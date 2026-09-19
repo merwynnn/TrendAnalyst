@@ -17,12 +17,15 @@ Judge, Writer) with hard budgets.
 
 | Phase | Scope | State |
 |---|---|---|
-| **P0** | Skeleton, layered config, `sources.yaml` registry (+Tier-A-in-L0 hard-fail), Postgres models + first migration, health CLI | **in progress** |
+| **P0** | Skeleton, layered config, `sources.yaml` registry (+Tier-A-in-L0 hard-fail), Postgres models + first migration, health CLI | **done** — see [`docs/evidence/P0.md`](docs/evidence/P0.md) (outcome) and [`P0-gate.md`](docs/evidence/P0-gate.md) (raw gate output) |
 | P1 | L0 collectors (HN, Wikipedia, one more Tier-S) + run ledger, watermarks, content-hash dedup | not started |
 | P2 | L1 mining + scoring v1 (MGS, fad features, Monte Carlo revenue) | not started |
 | P3 | LLM gates, gateway, cache | not started |
 | P4 | L2 enrichment, briefs, snapshots, TTL jobs | not started |
 | P5 | AGENT.md + USER_SETUP.md to bar, 50 golden evals, CI, monitor dry-run | not started |
+
+Gate: `bash scripts/gate.sh` — 11 checks, currently **PASS (0 pending)**. Run it after any
+change; it regenerates `docs/evidence/P0-gate.md` with raw output instead of a claim.
 
 Task tracking lives in `beans` (`.beans/`), not in this file: `beans list --ready`.
 

@@ -4,7 +4,7 @@
 # Runs every check the build brief requires and prints markdown with RAW output, so
 # evidence is generated rather than remembered:
 #
-#     bash scripts/gate.sh > docs/evidence/P0.md
+#     bash scripts/gate.sh > docs/evidence/P0-gate.md
 #
 # Checks that cannot pass yet because their phase has not landed are reported as
 # PENDING with the reason, and do not fail the gate. That is deliberate: a gate that
