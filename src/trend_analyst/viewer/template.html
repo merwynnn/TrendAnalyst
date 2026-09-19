@@ -98,9 +98,17 @@
         <option value="mp">sort: money</option>
         <option value="fe">sort: feasibility</option>
         <option value="p90">sort: revenue P90</option>
+        <option value="judge">sort: judge decision</option>
         <option value="mentions">sort: mentions</option>
       </select>
       <select id="category"><option value="">all categories</option></select>
+      <select id="judgefilter">
+        <option value="">all judge verdicts</option>
+        <option value="keep">judge: keep</option>
+        <option value="drop">judge: drop</option>
+        <option value="none">judge: not judged</option>
+        <option value="ungrounded">judge: no citation</option>
+      </select>
       <select id="label">
         <option value="">all fad labels</option>
         <option value="trend">trend</option><option value="fad">fad</option>
@@ -117,6 +125,7 @@
         <th class="num" data-k="mp">MP</th>
         <th class="num" data-k="fe">FE</th>
         <th data-k="fad">fad</th>
+        <th data-k="judge">judge</th>
         <th class="num" data-k="p90">$/mo (P10–P50–P90)</th>
         <th data-k="phrase">phrase</th>
         <th data-k="category">category</th>
@@ -128,6 +137,19 @@
   </section>
 
   <div id="detail"></div>
+
+  <section>
+    <h2>Gates</h2>
+    <div class="cards" id="gatecards"></div>
+    <table><thead><tr>
+      <th>gate</th><th class="num">answers</th><th class="num">prompt tok</th>
+      <th class="num">completion tok</th><th class="num">total tok</th>
+    </tr></thead><tbody id="gatetokens"></tbody></table>
+    <table><thead><tr>
+      <th>latest verdict</th><th>decision</th><th>fad</th><th>grounded</th><th>model</th>
+      <th>recorded</th><th>reason</th>
+    </tr></thead><tbody id="gatelatest"></tbody></table>
+  </section>
 
   <section>
     <h2>Sources</h2>
@@ -167,6 +189,7 @@ function cards() {
   const entries = [
     ['candidates', c.candidates], ['snapshots', c.snapshots], ['signals', c.signals],
     ['sources enabled', c.sources_enabled + ' / ' + c.sources], ['runs', c.runs],
+    ['judgements', c.judgements || 0],
   ];
   document.getElementById('cards').innerHTML = entries.map(([label, value]) =>
     `<div class="card"><b>${esc(value)}</b><span>${esc(label)}</span></div>`).join('');
@@ -174,7 +197,7 @@ function cards() {
 
 // Sorting and filtering are client-side: the payload is already the whole answer, and a
 // static file has no server to ask.
-let view = { filter: '', sort: 'mgs', category: '', label: '' };
+let view = { filter: '', sort: 'mgs', category: '', label: '', judge: '' };
 
 function sortValue(item, key) {
   const s = item.stored;
@@ -190,6 +213,7 @@ function sortValue(item, key) {
     case 'phrase': return item.phrase;
     case 'category': return item.category;
     case 'fad': return item.stored.fad.label;
+    case 'judge': return item.judge ? (item.judge.decision === 'keep' ? 0 : 1) : 2;
     case 'sources': return -item.evidence.source_count;
     default: return 0;
   }
@@ -200,6 +224,12 @@ function visible() {
   return DATA.items
     .filter((it) => !view.category || it.category === view.category)
     .filter((it) => !view.label || it.stored.fad.label === view.label)
+    .filter((it) => {
+      if (!view.judge) return true;
+      if (view.judge === 'none') return !it.judge;
+      if (view.judge === 'ungrounded') return Boolean(it.judge && it.judge.ungrounded);
+      return Boolean(it.judge && it.judge.decision === view.judge);
+    })
     .filter((it) => !needle || (it.phrase + ' ' + it.category + ' ' +
       it.evidence.sources.map((s) => s.source).join(' ')).toLowerCase().includes(needle))
     .sort((a, b) => {
@@ -222,6 +252,10 @@ function rows() {
       <td class="num">${num(sub.sp, 0)}</td><td class="num">${num(sub.mp, 0)}</td>
       <td class="num">${num(sub.fe, 0)}</td>
       <td><span class="pill ${esc(s.fad.label)}">${esc(s.fad.label)} ${num(s.fad.probability, 2)}</span></td>
+      <td>${it.judge
+        ? `<span class="pill ${it.judge.decision === 'keep' ? 'ok' : 'failed'}">${esc(it.judge.decision)}</span>` +
+          (it.judge.ungrounded ? ' <span class="pill fad">no cite</span>' : '')
+        : '<span class="pill never_run">not judged</span>'}</td>
       <td class="num">${money(s.revenue.p10)}–${money(s.revenue.p50)}–${money(s.revenue.p90)}</td>
       <td><b>${esc(it.phrase)}</b></td>
       <td>${esc(it.category_label)}</td>
@@ -232,6 +266,42 @@ function rows() {
   [...document.querySelectorAll('#rows tr')].forEach((tr) => {
     tr.addEventListener('click', () => detail(items[Number(tr.dataset.i)]));
   });
+}
+
+function judgeBlock(judge) {
+  if (!judge) {
+    return `<div class="pending"><b>not judged yet</b> — run the Judge gate:
+      <span class="tag">--judge-replay tests/data/llm/judge_verdict.json</span> (offline, no quota)
+      or <span class="tag">--judge</span> (live provider).</div>`;
+  }
+  const quotes = judge.quotes.length
+    ? judge.quotes.map((q) => `<div class="quote"><em>\u201c${esc(q.text)}\u201d</em>
+        <div class="tag">${esc(q.source_id || 'source')} \u00b7 <a href="${esc(q.url)}" target="_blank" rel="noopener">${esc(q.url)}</a></div></div>`).join('')
+    : `<div class="pending"><b>no surviving citation</b> \u2014 ${judge.dropped_quotes} quote(s)
+        were stripped because the URLs they named are not in this candidate's collected evidence
+        (spec 6.3, enforced in code). The verdict stands; its citations do not.</div>`;
+  return `
+    <div class="box">
+      <h4>Verdict \u2014 ${esc(judge.gate)} gate</h4>
+      ${kv([
+        ['decision', `<span class="pill ${judge.decision === 'keep' ? 'ok' : 'failed'}">${esc(judge.decision)}</span>`],
+        ['confidence', num(judge.confidence, 2)],
+        ['fad', judge.fad_label ? `${esc(judge.fad_label)} ${num(judge.fad_probability, 2)}` : '\u2014'],
+        ['grounded', judge.ungrounded ? '<span class="pill fad">no</span>' : '<span class="pill ok">yes</span>'],
+        ['model', esc(judge.provider + ':' + judge.model)],
+        ['tokens', `${judge.prompt_tokens}+${judge.completion_tokens}`],
+        ['recorded', esc(judge.created_at)],
+      ])}
+      <div class="quote" style="border-left-color:var(--accent)">${esc(judge.reason || 'no reason given')}</div>
+    </div>
+    <div class="box">
+      <h4>Cited quotes</h4>${quotes}
+    </div>
+    <div class="box">
+      <h4>Requested enrichment (Tier-A, P4)</h4>
+      ${judge.enrich.length ? judge.enrich.map((item) => `<span class="pill">${esc(item)}</span>`).join(' ')
+        : '<div class="pending">the gate asked for nothing specific</div>'}
+    </div>`;
 }
 
 function kv(pairs) {
@@ -327,6 +397,9 @@ function detail(it) {
         </div>
       </div>
 
+      <h4 style="margin:16px 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim)">Gate advice (LLM judge)</h4>
+      <div class="grid">${judgeBlock(it.judge)}</div>
+
       <h4 style="margin:16px 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim)">All sources that mentioned this phrase, with quotes</h4>
       <div class="grid">${sourceBlocks}</div>
 
@@ -367,12 +440,42 @@ function runs() {
     <td class="tag">${esc(r.notes || '')}</td></tr>`).join('');
 }
 
+function gates() {
+  const g = DATA.gates || {};
+  const entries = [
+    ['judgements', g.judgements || 0],
+    ['keep', (g.decisions || {}).keep || 0],
+    ['drop', (g.decisions || {}).drop || 0],
+    ['no citation', g.ungrounded || 0],
+    ['quotes stripped', g.quotes_stripped || 0],
+    ['gate tokens', (g.prompt_tokens || 0) + (g.completion_tokens || 0)],
+  ];
+  document.getElementById('gatecards').innerHTML = entries.map(([label, value]) =>
+    `<div class="card"><b>${esc(value)}</b><span>${esc(label)}</span></div>`).join('');
+  const log = g.token_log || {};
+  document.getElementById('gatetokens').innerHTML = Object.keys(log).length
+    ? Object.entries(log).map(([gate, row]) => `<tr><td><b>${esc(gate)}</b></td>
+        <td class="num">${row.answers}</td><td class="num">${row.prompt_tokens}</td>
+        <td class="num">${row.completion_tokens}</td><td class="num">${row.total_tokens}</td></tr>`).join('')
+    : '<tr><td colspan="5" class="tag">no cached answers yet</td></tr>';
+  document.getElementById('gatelatest').innerHTML = (g.latest || []).length
+    ? g.latest.map((v) => `<tr>
+      <td><b>${esc((v.quotes[0] || {}).text || v.model)}</b><div class="tag">${esc(v.gate)}</div></td>
+      <td><span class="pill ${v.decision === 'keep' ? 'ok' : 'failed'}">${esc(v.decision)}</span></td>
+      <td>${esc(v.fad_label || '\u2014')}</td>
+      <td>${v.ungrounded ? '<span class="pill fad">no citations</span>' : '<span class="pill ok">cited</span>'}</td>
+      <td class="tag">${esc(v.provider + ':' + v.model)}</td>
+      <td class="tag">${esc(v.created_at)}</td>
+      <td class="tag">${esc((v.reason || '').slice(0, 160))}</td></tr>`).join('')
+    : '<tr><td colspan="7" class="tag">the Judge gate has not run yet</td></tr>';
+}
+
 function pending() {
   document.getElementById('pending').innerHTML = Object.entries(DATA.pending).map(([k, v]) =>
     `<div class="pending"><b>${esc(k)}</b> — ${esc(v)}</div>`).join('');
 }
 
-cards(); sources(); runs(); pending(); rows();
+cards(); gates(); sources(); runs(); pending(); rows();
 const scope = DATA.view_run || {};
 document.getElementById('scope').innerHTML = scope.run_id
   ? `showing <b>${esc(scope.scope)}</b> · run <span class="tag">${esc(scope.run_id)}</span> ` +
@@ -383,7 +486,17 @@ const wanted = decodeURIComponent((location.hash.match(/item=([^&]*)/) || [])[1]
 if (wanted) {
   const match = DATA.items.find((it) => it.phrase.toLowerCase() === wanted.toLowerCase())
     || DATA.items.find((it) => it.phrase.toLowerCase().includes(wanted.toLowerCase()));
-  if (match) detail(match);
+  if (match) {
+    detail(match);
+  } else {
+    // Honest empty state: the phrase exists in the database but not in the run the page shows,
+    // and saying so is more useful than rendering nothing at all.
+    document.getElementById('detail').innerHTML = `<section><div class="pending">
+      <b>${esc(wanted)}</b> is not in this view. The page shows the newest decide run
+      (${DATA.items.length} candidate(s)); this phrase was mined or judged in an earlier run.
+      Rebuild with <span class="tag">--all-runs</span> to see every run's newest snapshot.
+    </div></section>`;
+  }
 }
 document.getElementById('foot').textContent =
   `built ${DATA.generated_at} · reference instant ${DATA.as_of} · ` +
@@ -391,6 +504,7 @@ document.getElementById('foot').textContent =
 document.getElementById('filter').addEventListener('input', (e) => { view.filter = e.target.value; rows(); });
 document.getElementById('sort').addEventListener('change', (e) => { view.sort = e.target.value; rows(); });
 document.getElementById('label').addEventListener('change', (e) => { view.label = e.target.value; rows(); });
+document.getElementById('judgefilter').addEventListener('change', (e) => { view.judge = e.target.value; rows(); });
 document.getElementById('category').addEventListener('change', (e) => { view.category = e.target.value; rows(); });
 document.getElementById('category').innerHTML += DATA.items
   .map((i) => i.category).filter((v, i, a) => a.indexOf(v) === i).sort()

@@ -179,10 +179,10 @@ def parse_gate_output(raw: str, model: type[BaseModel]) -> ValidationOutcome:
 
 
 def enforce_grounding(
-    verdict: JudgeVerdict | WriterBrief,
+    verdict: JudgeVerdict | WriterBrief | JudgeBatch,
     *,
     evidence_urls: Iterable[str] = (),
-) -> tuple[JudgeVerdict | WriterBrief, int]:
+) -> tuple[JudgeVerdict | WriterBrief | JudgeBatch, int]:
     """Strip every claim that cannot be traced to a URL the pipeline actually collected.
 
     Returns the cleaned object and how many quotes were removed. An object whose quotes are all
@@ -194,6 +194,21 @@ def enforce_grounding(
     because the alternative (stripping everything) would silently turn a data gap into a
     grounding failure. That case is visible: the caller passes the candidate's URLs.
     """
+    # A BATCH must be grounded verdict by verdict. The first implementation checked for a
+    # `.quotes` attribute, which a `JudgeBatch` does not have — so the rule silently did nothing
+    # on the exact path the Judge gate uses, and every invented citation in a nightly batch would
+    # have been stored as fact. Found by the test that asserts an ungrounded verdict is marked.
+    if hasattr(verdict, "verdicts"):
+        cleaned_items: list[JudgeVerdict] = []
+        total_dropped = 0
+        for item in verdict.verdicts:
+            cleaned_item, dropped = enforce_grounding(item, evidence_urls=evidence_urls)
+            if isinstance(cleaned_item, JudgeVerdict):
+                cleaned_items.append(cleaned_item)
+            total_dropped += dropped
+        batch = verdict.model_copy(update={"verdicts": cleaned_items})
+        return batch, total_dropped
+
     allowed = {url.strip() for url in evidence_urls if url and url.strip()}
     kept: list[Quote] = []
     dropped = 0

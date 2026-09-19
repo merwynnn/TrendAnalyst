@@ -19,6 +19,7 @@ Judge, Writer) with hard budgets.
 |---|---|---|
 | **P0** | Skeleton, layered config, `sources.yaml` registry (+Tier-A-in-L0 hard-fail), Postgres models + first migration, health CLI | **done** — see [`docs/evidence/P0.md`](docs/evidence/P0.md) (outcome) and [`P0-gate.md`](docs/evidence/P0-gate.md) (raw gate output) |
 | **P6** | **Results explorer** — one self-contained interactive HTML page with maximum detail per item: every named source that mentioned it with quotes and URLs, all five sub-scores with their inputs, the full feature vector, the fad features, the Monte Carlo assumptions, score history per weights version, run/gate status, and an explicit "still missing" panel for the phases that have not run | **first cut done** — `uv run python -m trend_analyst.viewer.build --out docs/viewer/index.html`; deep-link an item with `#item=<phrase>`. Extends as P3 (Judge verdicts, cited quotes), P4 (Tier-A market data) and P5 (Writer briefs, alerts, eval results) land |
+| **P3** | LLM gates: provider chain with failover, per-gate budgets, 30-day cache, Pydantic schemas, code-enforced grounding, the Judge gate and its append-only `judgements` | **done** — see [`docs/evidence/P3.md`](docs/evidence/P3.md) (outcome), [`P3-drill.txt`](docs/evidence/P3-drill.txt) (live drill) and [`P3-gate.md`](docs/evidence/P3-gate.md) (raw gate) |
 | **P2** | L1 mining + scoring v1: phrase extraction, per-category EWMA z-scores, 95% prune, MGS in code, fad flag, Monte Carlo revenue, 10 golden eval cases | **done** — see [`docs/evidence/P2.md`](docs/evidence/P2.md) (outcome) and [`P2-gate.md`](docs/evidence/P2-gate.md) (raw gate output) |
 | **P1** | L0 collectors (HN, Wikipedia, Arctic Shift) + run ledger, watermarks, content-hash dedup, kill-and-resume | **done** — see [`docs/evidence/P1.md`](docs/evidence/P1.md) (outcome) and [`P1-gate.md`](docs/evidence/P1-gate.md) (raw gate output) |
 | P2 | L1 mining + scoring v1 (MGS, fad features, Monte Carlo revenue) | not started |
@@ -26,8 +27,8 @@ Judge, Writer) with hard budgets.
 | P4 | L2 enrichment, briefs, snapshots, TTL jobs | not started |
 | P5 | AGENT.md + USER_SETUP.md to bar, 50 golden evals, CI, monitor dry-run | not started |
 
-Gate: `bash scripts/gate.sh` — 13 checks, currently **PASS (0 pending)**. Run it after any
-change; it regenerates `docs/evidence/P2-gate.md` with raw output instead of a claim.
+Gate: `bash scripts/gate.sh` — 14 checks, currently **PASS (0 pending)**. Run it after any
+change; it regenerates `docs/evidence/P3-gate.md` with raw output instead of a claim.
 
 Task tracking lives in `beans` (`.beans/`), not in this file: `beans list --ready`.
 
@@ -111,6 +112,8 @@ decision the human approved or an addition the spec layout does not name.
 | D6 | `config/secrets.local.yaml` is the credential store (env vars remain an optional override) | Human instruction B4: "don't put the api keys on environment variable, let them in a file". Spec §10 allows either. |
 | D7 | Postgres runs in WSL (Ubuntu 26.04, PG 18 + pgvector) and is held up by `scripts/db_up.sh` | Human decision B1a. WSL terminates idle distros (measured), so a parked `sleep infinity` keeps it reachable — the alternative, a native Windows build, cannot install pgvector without an MSVC toolchain. |
 | D9 | `src/trend_analyst/net.py` — the HTTP client, egress allowlist and fixture replay | The spec layout has no home for network plumbing; plugins must not choose their own transport (spec §10) |
+| D12 | `judgements` table (migration 0002) — §6.2's cited keep/drop verdicts have no home in the §7 table list, and the LLM cache expires in 30 days, so the advice would die while the decision it justified lived on | The Judge's output is durable, append-only and queryable, with its citations and token counts |
+| D13 | A second Gemini model in the provider chain | The live drill produced a real 503 "experiencing high demand" on the first model while small requests succeeded, and with Groq unkeyed and Cerebras unfunded (402) one model per provider meant a gate outage. The distinct-provider order is still Gemini → Groq → Cerebras → Ollama |
 | D11 | The results explorer lives in `src/trend_analyst/viewer/` and writes one self-contained HTML file | The spec's §3 tree has no viewer, and "new code goes in the matching folder, nothing ad-hoc at root" leaves the package as its home. A served app would need auth, a port and a supervisor to answer a question a file answers |
 | D10 | `src/trend_analyst/store/sync.py` — registry mirror logic moved out of `scripts/` | The orchestrator needs it before a run (a watermark lives on the source row), and `src/` must not import from `scripts/` |
 | D8 | The DSN uses `127.0.0.1`, never `localhost` | On Windows `localhost` resolves to IPv6 `::1` FIRST, and WSL's port relay black-holes `::1`: every connection then burned 130 s before falling back to IPv4 (measured: 130.09 s as `localhost`, 0.06 s as `127.0.0.1`). Same reason `migrations/env.py` sets `connect_timeout` and `lock_timeout` — a migration must fail fast, never hang. |

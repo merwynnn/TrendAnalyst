@@ -204,6 +204,7 @@ def call_gate(
     run_id: Any = None,
     now: datetime | None = None,
     dry_run: bool = False,
+    bypass_cache: bool = False,
 ) -> GatewayOutcome:
     """Run one gate call through cache, caps, chain, schema and grounding.
 
@@ -217,6 +218,9 @@ def call_gate(
         evidence_urls: the URLs the pipeline actually collected for this candidate. Grounding
             is enforced against these.
         dry_run: do everything, write nothing, call nobody — used by tests and by `--dry-run`.
+        bypass_cache: skip the cache read (and still write), for a replay that must exercise the
+            whole path. Without it, a second replay is served from the cache and its accounting
+            columns read zero — which made a gate probe assert token counts that proved nothing.
     """
     providers = tuple(chain) if chain is not None else default_chain()
     limits = budget or DEFAULT_BUDGETS[gate]
@@ -243,7 +247,7 @@ def call_gate(
 
     primary = providers[0] if providers else ProviderSpec(name="none", model="none")
     key = cache_key(gate, primary.model, key_material)
-    if not dry_run:
+    if not dry_run and not bypass_cache:
         cached_output = get_cached(session, key, now=now)
         if cached_output is not None:
             validated = schema.model_validate(cached_output)
@@ -343,8 +347,13 @@ def call_gate(
 
 
 def _ground(value: Any, evidence_urls: Sequence[str]) -> tuple[Any, int]:
-    """Apply the code-enforced grounding rule to whatever the schema produced."""
-    if hasattr(value, "quotes"):
+    """Apply the code-enforced grounding rule to whatever the schema produced.
+
+    The guard checks for `quotes` **or** `verdicts`: a `JudgeBatch` holds its citations inside
+    its verdicts, so a `hasattr(value, "quotes")` test silently skipped grounding on the Judge
+    gate's own path — the batch was stored with invented citations intact.
+    """
+    if hasattr(value, "quotes") or hasattr(value, "verdicts"):
         return enforce_grounding(value, evidence_urls=evidence_urls)
     return value, 0
 

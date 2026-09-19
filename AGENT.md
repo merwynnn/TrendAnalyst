@@ -52,6 +52,10 @@ TA_MIGRATION_TRACE=1 uv run alembic upgrade head   # where did a migration stop?
 uv run python -m trend_analyst.pipeline.orchestrator --layers L0
 uv run python -m trend_analyst.pipeline.orchestrator --layers L1,L3   # mine, score, snapshot
 uv run python -m trend_analyst.pipeline.orchestrator --rank            # the ranked table, from snapshots
+uv run python -m trend_analyst.pipeline.orchestrator --judge-replay tests/data/llm/judge_verdict.json --fresh
+                                                            # the Judge gate offline over a REAL recorded answer
+uv run python -m trend_analyst.pipeline.orchestrator --judge  # the Judge gate live (needs a provider key)
+uv run python -m scripts.llm_drill             # one live run: failover + cache + accounting + grounding
 uv run python -m scripts.seed_evals --count 10                         # seed golden eval cases from real output
 uv run python -m scripts.category_coverage                             # how much of the lake the taxonomy matches
 uv run python -m trend_analyst.pipeline.orchestrator --json            # machine-readable

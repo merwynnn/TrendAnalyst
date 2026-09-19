@@ -1,0 +1,36 @@
+{
+  "completion_tokens": 239,
+  "gate": "judge",
+  "model": "gemini-3.6-flash",
+  "output": {
+    "category": "tools_diy",
+    "confidence": 0.85,
+    "decision": "keep",
+    "dropped_quotes": 0,
+    "enrich": [
+      "circular saw blade guard replacements",
+      "compact circular saw for small workshops",
+      "heavy duty base plate circular saw"
+    ],
+    "fad_label": "evergreen",
+    "fad_probability": 0.1,
+    "phrase": "circ saw",
+    "quotes": [
+      {
+        "source_id": "arctic_shift",
+        "text": "the blade guard on my circ saw broke in a week and the base plate is not flat",
+        "url": "https://www.reddit.com/r/Tools/comments/abc123/circ_saw_blade_guard/"
+      },
+      {
+        "source_id": "hn_firebase",
+        "text": "Ask HN: what is the best circ saw for a small workshop?",
+        "url": "https://news.ycombinator.com/item?id=49734467"
+      }
+    ],
+    "reason": "The term 'circ saw' (circular saw) represents an evergreen tool category with active consumer discussions around product performance and quality gaps, such as blade guard durability and base plate alignment issues.",
+    "ungrounded": false
+  },
+  "prompt_tokens": 463,
+  "recorded_at": "2026-09-19T18:26:28.944771+02:00",
+  "source": "live provider response captured by scripts/llm_drill.py"
+}

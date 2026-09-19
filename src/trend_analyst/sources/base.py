@@ -255,9 +255,18 @@ class RawBatch(BaseModel):
     def byte_size(self) -> int:
         return sum(len(part.encode("utf-8")) for part in self.parts)
 
-    def is_unchanged_since(self, stored_hash: str | None) -> bool:
-        """Whether this batch matches what the lake already holds."""
-        return stored_hash is not None and stored_hash == self.content_hash
+    def is_unchanged_since(self, stored_hashes: str | set[str] | None) -> bool:
+        """Whether this batch matches what the lake already holds.
+
+        Accepts a set of recently stored hashes (or a single hash, or None). The set form is what
+        the orchestrator passes: a source that emits several payloads per run needs its whole
+        recent history checked, not only the most recent row.
+        """
+        if stored_hashes is None:
+            return False
+        if isinstance(stored_hashes, str):
+            return stored_hashes == self.content_hash
+        return self.content_hash in stored_hashes
 
     @classmethod
     def from_parts(

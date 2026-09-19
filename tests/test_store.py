@@ -44,10 +44,16 @@ from trend_analyst.store.models import (
 
 pytestmark = pytest.mark.db
 
+#: The specification's §7 table list, plus one documented addition:
+#: `judgements` (deviation D12) — §6.2 requires the Judge's cited verdicts to be durable and §6.3
+#: makes grounding a code-enforced rule, but the table list has nowhere to put either, and the LLM
+#: cache expires after 30 days. It is asserted here rather than assumed, so the deviation is
+#: visible to anyone comparing this test with the specification.
 EXPECTED_TABLES = {
     "briefs",
     "candidates",
     "eval_cases",
+    "judgements",
     "llm_cache",
     "quota_ledger",
     "raw_items",
@@ -170,7 +176,12 @@ def test_append_only_triggers_exist(db_engine: Engine) -> None:
             ).scalars()
         )
     assert triggers.issuperset(
-        {"trg_scores_append_only", "trg_briefs_append_only", "trg_quota_ledger_append_only"}
+        {
+            "trg_scores_append_only",
+            "trg_briefs_append_only",
+            "trg_quota_ledger_append_only",
+            "trg_judgements_append_only",
+        }
     )
 
 

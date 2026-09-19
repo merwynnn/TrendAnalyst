@@ -131,7 +131,8 @@ def run() -> dict:
          "--fixtures", "tests/data", "--json", *SOURCES],
         capture_output=True, text=True, check=True,
     )
-    return json.loads(out.stdout)
+    # The CLI emits ONE document per invocation; a plain L0 run nests it under "l0".
+    return json.loads(out.stdout)["l0"]
 
 first = run()
 second = run()
@@ -215,8 +216,8 @@ p2_probe() {
 local first second hash1 hash2
 first=$(uv run python -m trend_analyst.pipeline.orchestrator --layers L1,L3 --top 3 --json 2>/dev/null)
 second=$(uv run python -m trend_analyst.pipeline.orchestrator --layers L1,L3 --top 3 --json 2>/dev/null)
-hash1=$(printf '%s' "$first" | uv run python -c 'import json,sys; print(json.load(sys.stdin)["snapshot_hash"])')
-hash2=$(printf '%s' "$second" | uv run python -c 'import json,sys; print(json.load(sys.stdin)["snapshot_hash"])')
+hash1=$(printf '%s' "$first" | uv run python -c 'import json,sys; print(json.load(sys.stdin)["decide"]["snapshot_hash"])')
+hash2=$(printf '%s' "$second" | uv run python -c 'import json,sys; print(json.load(sys.stdin)["decide"]["snapshot_hash"])')
 json_out=$(mktemp)
 printf '%s' "$first" > "$json_out"
 # NB: the payload goes through a file, not a pipe: with `python - <<HEREDOC` the heredoc IS
@@ -225,7 +226,7 @@ printf '%s' "$first" > "$json_out"
 uv run python - "$json_out" <<'PROBE' || { rm -f "$json_out"; return 1; }
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as handle:
-    payload = json.load(handle)
+    payload = json.load(handle)["decide"]  # one document per invocation, phases nested
 mining, scoring = payload["mining"], payload["scoring"]
 print(f"texts: {mining['texts']} · ngrams: {mining['ngrams']} · candidates: {mining['mined']}")
 print(f"kept {mining['kept']} (pruned {mining['pruned']}, unmatched {mining['unmatched']}) "
@@ -250,6 +251,29 @@ fi
 printf 'replay determinism: identical snapshot hash %s\n' "${hash1:0:16}"
 }
 check "P2 decide — rank, snapshot, deterministic replay" p2_probe
+p3_probe() {
+# P3 acceptance, offline: the Judge gate replays a REAL recorded provider answer through the
+# gateway, schema, grounding rule and candidate table — no network, no quota, no cost.
+local out
+out=$(uv run python -m trend_analyst.pipeline.orchestrator --judge-replay tests/data/llm/judge_verdict.json --fresh --json 2>/dev/null)
+printf '%s' "$out" > "${TMPDIR:-/tmp}/ta_p3.json"
+uv run python - "${TMPDIR:-/tmp}/ta_p3.json" <<'PROBE' || return 1
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+judge = payload["judge"]
+judged = judge["judged"]
+print(f"replayed: {judge['source']} · judged={judged} kept={judge['kept']} "
+      f"dropped={judge['dropped']} unknown={judge['unknown_phrase']} "
+      f"ungrounded={judge['ungrounded']} quotes_stripped={judge['removed_quotes']}")
+assert judged >= 1, "the replay must apply at least one verdict"
+assert judge["unknown_phrase"] == 0, "a batch must never apply another batch's verdict"
+assert judge["batches"] >= 1
+assert judge["prompt_tokens"] > 0, "the recording carries a real provider's token counts"
+assert judge["status"] == "ok", judge["reason"]
+PROBE
+}
+check "P3 judge — offline replay of a recorded verdict" p3_probe
 # --- summary -----------------------------------------------------------------
 header "Summary"
 if [ "$failures" -eq 0 ]; then

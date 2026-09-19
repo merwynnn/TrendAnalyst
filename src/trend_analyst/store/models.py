@@ -384,6 +384,58 @@ class LLMCache(Base):
     )
 
 
+class Judgement(Base):
+    """One gate's verdict on one candidate, with the citations that justified it.
+
+    Append-only (migration 0002, deviation D12): the specification's §7 table list has nowhere to
+    put §6.2's *"keep/drop + fad probability + enrich list, JSON, cited quotes"*, and the LLM cache
+    expires after 30 days — so the advice would die while the decision it justified lived on.
+    `candidates.status` carries the current state for cheap queries; this table is the history.
+    """
+
+    __tablename__ = "judgements"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    candidate_id: Mapped[int] = mapped_column(
+        ForeignKey("candidates.id", ondelete="RESTRICT"), nullable=False
+    )
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False
+    )
+    gate: Mapped[str] = mapped_column(String(16), nullable=False)
+    decision: Mapped[str] = mapped_column(String(8), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    fad_label: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    fad_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    #: Quotes that survived the code-enforced grounding rule (spec §6.3).
+    quotes: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    #: What the Judge asked L2 to fetch (Tier-A, P4).
+    enrich: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    ungrounded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    dropped_quotes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    model: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    cache_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = _utc_now_column()
+
+    __table_args__ = (
+        UniqueConstraint("candidate_id", "run_id", "gate", name="uq_judgements_candidate"),
+        CheckConstraint("gate IN ('planner', 'judge', 'writer')", name="gate_known"),
+        CheckConstraint("decision IN ('keep', 'drop')", name="decision_known"),
+        CheckConstraint("confidence >= 0 AND confidence <= 1", name="confidence_in_range"),
+        CheckConstraint(
+            "fad_label IS NULL OR fad_label IN ('fad', 'trend', 'evergreen')",
+            name="fad_label_known",
+        ),
+        CheckConstraint("dropped_quotes >= 0", name="dropped_quotes_non_negative"),
+        Index("ix_judgements_candidate_created", "candidate_id", "created_at"),
+        Index("ix_judgements_run_id", "run_id"),
+    )
+
+
 class EvalCase(Base):
     """Golden case with the behaviour the system must show on it (spec §8)."""
 

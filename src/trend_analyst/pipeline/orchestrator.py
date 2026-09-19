@@ -40,6 +40,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from config.categories import TaxonomyError, default_taxonomy
 from config.settings import ConfigError, default_config_dir, load_settings
+from trend_analyst.llm.gates import judge_candidates, pending_judgements
+from trend_analyst.llm.providers import settings_sender
+from trend_analyst.llm.replay import ReplayMissError, load_fixture, replay_sender
+from trend_analyst.llm.schemas import JudgeVerdict
 from trend_analyst.logging import configure_logging, get_logger, log_event
 from trend_analyst.net import (
     EgressDeniedError,
@@ -86,7 +90,7 @@ from trend_analyst.store.db import (
     create_db_engine,
     create_session_factory,
 )
-from trend_analyst.store.models import RawItem, SignalRow
+from trend_analyst.store.models import Candidate, RawItem, SignalRow
 from trend_analyst.store.sync import sync_sources
 
 __all__ = ["RunReport", "SourceOutcome", "collect_one", "run_l0"]
@@ -176,22 +180,36 @@ class RunReport:
         return "\n".join(lines)
 
 
-def _latest_hash(session: Session, source_id: str) -> str | None:
-    """The content hash of the most recent payload stored for a source (spec §5.2)."""
-    return session.execute(
+def _recent_hashes(session: Session, source_id: str, window: int = 50) -> set[str]:
+    """The content hashes this source has stored recently — the dedup set (spec §5.2).
+
+    A *set*, not just the newest hash. Comparing against the newest row only works while a source
+    emits one payload per run: with several, the last one stored masks the others and every
+    subsequent run re-parses payloads it has already seen (the gate's L0 probe caught exactly
+    that, reporting a second run that parsed 12 payloads it should have skipped).
+    """
+    rows = session.execute(
         select(RawItem.content_hash)
         .where(RawItem.source_id == source_id)
         .order_by(RawItem.id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
+        .limit(window)
+    ).scalars().all()
+    return {str(row) for row in rows}
 
 
-def _store_raw(session: Session, *, run_id: str, batch: RawBatch) -> None:
-    """Keep a *reference* to the payload, never the payload (brief §4: state stores
-    references and hashes, never blobs). The signals are the extracted data; the lake
-    keeps what is needed to know it was seen, and expires after 90 days (spec §5.4)."""
-    session.add(
-        RawItem(
+def _store_raw(session: Session, *, run_id: str, batch: RawBatch) -> bool:
+    """Keep a *reference* to the payload, never the payload (brief §4: state stores references
+    and hashes, never blobs). Returns True when a new row was written.
+
+    `ON CONFLICT DO NOTHING` on (source_id, content_hash), and the conflict is a normal outcome:
+    one run can fetch two payloads that hash the same — an unchanged front page between two
+    polled moments, or a source repeating a block — and the lake's unique key exists precisely so
+    the second write is a no-op. The first version used a plain insert, so a repeated payload
+    inside a single run raised a UniqueViolation and took the source down with it.
+    """
+    statement = (
+        pg_insert(RawItem)
+        .values(
             source_id=batch.source_id,
             run_id=run_id,
             fetched_at=batch.fetched_at,
@@ -204,7 +222,11 @@ def _store_raw(session: Session, *, run_id: str, batch: RawBatch) -> None:
                 "requests": batch.request_count,
             },
         )
+        .on_conflict_do_nothing(constraint="uq_raw_items_source_id")
+        .returning(RawItem.id)
     )
+    inserted = session.execute(statement).scalar_one_or_none()
+    return inserted is not None
 
 
 def _store_signals(session: Session, signals: Sequence[Any]) -> int:
@@ -316,8 +338,8 @@ def collect_one(  # noqa: PLR0911 — one return per outcome is clearer than a s
             reason="the source returned no payloads",
         )
 
-    stored_hash = _latest_hash(session, entry.id)
-    if batch.is_unchanged_since(stored_hash):
+    seen_hashes = _recent_hashes(session, entry.id)
+    if batch.is_unchanged_since(seen_hashes):
         if not dry_run:
             advance_watermark(session, entry.id, batch.cursor)
         return SourceOutcome(
@@ -344,6 +366,8 @@ def collect_one(  # noqa: PLR0911 — one return per outcome is clearer than a s
             reason="dry run: nothing written",
         )
 
+    # The lake write is idempotent by key, so a repeated payload in one run is a no-op rather
+    # than a UniqueViolation that would take the source down with it.
     _store_raw(session, run_id=run_id, batch=batch)
     new_signals = _store_signals(session, signals)
     advance_watermark(session, entry.id, batch.cursor)
@@ -612,7 +636,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--layers",
-        default="L0",
+        default=None,
         metavar="L0,L1,L3",
         help="layers to run: L0 (collect), L1+L3 (mine, score, snapshot). L2 is P4.",
     )
@@ -656,11 +680,36 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the ranked table from the snapshot history and exit",
     )
+    # Judge gate (P3). Live by default when a provider key exists; --judge-replay runs the whole
+    # gate over a recorded provider answer, which needs no network and no quota.
+    parser.add_argument(
+        "--judge",
+        action="store_true",
+        help="run the Judge gate over the newest decide run's candidates (needs a provider key)",
+    )
+    parser.add_argument(
+        "--judge-replay",
+        default=None,
+        metavar="FIXTURE",
+        help="run the Judge gate offline against a recorded provider answer",
+    )
+    parser.add_argument(
+        "--judge-batch-size", type=int, default=10, help="candidates per Judge call"
+    )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="ignore the LLM cache for this run (a replay must exercise the whole path)",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    # Default depends on intent: a plain invocation collects, while --judge/--judge-replay should
+    # not drag a full L0 run along with it (the first replay did, drowning the output).
+    if args.layers is None:
+        args.layers = "L1,L3" if (args.judge or args.judge_replay) else "L0"
     requested = {layer.strip().upper() for layer in args.layers.split(",") if layer.strip()}
     unknown = requested - {"L0", "L1", "L3"}
     if unknown:
@@ -696,36 +745,164 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     sessions = create_session_factory(engine)
-    exit_code = 0
-    try:
-        if args.rank:
-            with sessions() as session:
-                ranked = read_ranked(session, limit=args.top)
+    if args.rank:
+        with sessions() as session:
+            ranked = read_ranked(session, limit=args.top)
+        if args.json:
+            print(json.dumps({"rank": [row.as_dict() for row in ranked]}, indent=2, default=str))
+        else:
             print(_render_ranked(ranked))
-            return 0
+        engine.dispose()
+        return 0
 
-        if "L0" in requested:
-            exit_code = _run_l0_cli(args, registry, sessions, engine)
-
-        if requested & {"L1", "L3"}:
-            decide = run_decide(
-                sessions=sessions,
-                taxonomy=taxonomy,
-                as_of=_resolve_as_of(args, sessions),
-                trigger="manual",
-                min_keep=args.min_keep,
-                prune_fraction=args.prune_fraction,
-                source_ids=args.source or None,
-                dry_run=args.dry_run,
-                top=args.top,
-            )
-            if args.json:
-                print(json.dumps(decide.summary(), indent=2, default=str))
-            else:
-                print(decide.render(top=args.top))
+    try:
+        exit_code, combined = _dispatch(
+            args,
+            settings=settings,
+            registry=registry,
+            taxonomy=taxonomy,
+            sessions=sessions,
+            engine=engine,
+        )
+        if args.json and combined:
+            print(json.dumps(combined, indent=2, default=str))
     finally:
         engine.dispose()
     return exit_code
+
+
+def _dispatch(
+    args: Any,
+    *,
+    settings: Any,
+    registry: Any,
+    taxonomy: Any,
+    sessions: sessionmaker[Session],
+    engine: Engine,
+) -> tuple[int, dict[str, Any]]:
+    """Run the phases the invocation asked for, in order, collecting one JSON payload.
+
+    Judging comes after deciding, because the gate judges what the decide layer just produced.
+    """
+    requested = {layer.strip().upper() for layer in str(args.layers).split(",") if layer.strip()}
+    exit_code = 0
+    # One command, one JSON document. Printing per phase produced two concatenated documents on
+    # stdout, which no consumer can parse — the gate's own probe tripped over it.
+    combined: dict[str, Any] = {}
+
+    if "L0" in requested:
+        exit_code, l0_payload = _run_l0_cli(args, registry, sessions, engine)
+        if l0_payload is not None:
+            combined["l0"] = l0_payload
+
+    if requested & {"L1", "L3"}:
+        decide = run_decide(
+            sessions=sessions,
+            taxonomy=taxonomy,
+            as_of=_resolve_as_of(args, sessions),
+            trigger="manual",
+            min_keep=args.min_keep,
+            prune_fraction=args.prune_fraction,
+            source_ids=args.source or None,
+            dry_run=args.dry_run,
+            top=args.top,
+        )
+        if args.json:
+            combined["decide"] = decide.summary()
+        else:
+            print(decide.render(top=args.top))
+
+    # Judging comes after deciding: the gate judges what the decide layer just produced.
+    if args.judge or args.judge_replay:
+        judge_code, judge_payload = _run_judge_cli(args, settings, sessions, exit_code)
+        exit_code = max(exit_code, judge_code)
+        if judge_payload is not None:
+            combined["judge"] = judge_payload
+
+    return exit_code, combined
+
+
+def _run_judge_cli(
+    args: Any,
+    settings: Any,
+    sessions: sessionmaker[Session],
+    exit_code: int,
+) -> tuple[int, dict[str, Any] | None]:
+    """Run the Judge gate from the CLI: live when keys exist, replayed when asked.
+
+    Returns (exit code, JSON payload). The payload is returned rather than printed so that a
+    command combining phases still emits exactly one JSON document.
+    """
+    replay_path = Path(args.judge_replay) if args.judge_replay else None
+    with sessions() as session:
+        if replay_path is not None:
+            try:
+                fixture = load_fixture(replay_path)
+            except ReplayMissError as exc:
+                print(f"replay unavailable: {exc}", file=sys.stderr)
+                return 1, None
+            recorded = JudgeVerdict.model_validate(fixture["output"])
+            named = session.execute(
+                select(Candidate).where(Candidate.phrase == recorded.phrase)
+            ).scalars().first()
+            # A recording answers one phrase, so judging a night's worth of candidates with it
+            # would report misses for no reason. The replay judges exactly what it can answer.
+            queue = [] if named is None else [named]
+            if named is None:
+                print(
+                    f"recording names {recorded.phrase!r}, which is not a candidate in this "
+                    "database: nothing to replay",
+                    file=sys.stderr,
+                )
+                return 1, None
+            sender = replay_sender(
+                fixture, covered=[str(candidate.phrase) for candidate in queue]
+            )
+            note = f"replayed {fixture['recorded_at']}"
+        else:
+            queue = list(pending_judgements(session, limit=args.judge_batch_size * 3))
+            try:
+                sender = settings_sender(settings)
+            except Exception as exc:  # a missing transport is a configuration problem
+                print(f"judge unavailable: {exc}", file=sys.stderr)
+                return 1, None
+            note = "live provider call"
+
+        if not queue:
+            print("no unjudged candidates: run --layers L0,L1,L3 first")
+            return exit_code, None
+
+        handle = start_run(session, trigger="manual", resume=False)
+        session.commit()
+        report = judge_candidates(
+            session,
+            run_id=handle.run_id,
+            sender=sender,
+            candidates=queue,
+            batch_size=args.judge_batch_size,
+            dry_run=args.dry_run,
+            bypass_cache=getattr(args, "fresh", False),
+        )
+        if not args.dry_run:
+            finish_run(
+                session,
+                str(handle.run_id),
+                status="ok" if report.ok else "degraded",
+                layer_status={"L3-judge": report.as_dict()},
+                notes=f"{report.summary()} ({note})",
+            )
+            session.commit()
+
+    if not args.json:
+        print(f"judge run {handle.run_id} ({note})")
+        print(report.summary())
+        for entry in report.per_batch:
+            print(
+                f"  batch {entry['batch']}: {entry['status']} applied={entry['applied']} "
+                f"missing={entry['missing']} provider={entry['provider']}"
+            )
+    payload = {**report.as_dict(), "source": note}
+    return (exit_code if report.ok else 1), payload
 
 
 def _resolve_as_of(args: Any, sessions: sessionmaker[Session]) -> datetime:
@@ -779,8 +956,8 @@ def _run_l0_cli(
     registry: Any,
     sessions: sessionmaker[Session],
     engine: Engine,
-) -> int:
-    """Run L0 from the CLI's arguments and print the report. Returns the exit code."""
+) -> tuple[int, dict[str, Any] | None]:
+    """Run L0 from the CLI's arguments. Returns (exit code, JSON payload or None)."""
     fixtures_dir = Path(args.fixtures) if args.fixtures else None
     report = run_l0(
         registry=registry,
@@ -795,17 +972,13 @@ def _run_l0_cli(
         max_sources=args.limit,
         dry_run=args.dry_run,
     )
-    if args.json:
-        print(
-            json.dumps(
-                {**report.summary(), "outcomes": [asdict(o) for o in report.outcomes]},
-                indent=2,
-                default=str,
-            )
-        )
-    else:
+    payload = {
+        **report.summary(),
+        "outcomes": [asdict(outcome) for outcome in report.outcomes],
+    }
+    if not args.json:
         print(report.render())
-    return 0 if report.status in {"ok", "partial"} else 1
+    return (0 if report.status in {"ok", "partial"} else 1), payload
 
 
 if __name__ == "__main__":

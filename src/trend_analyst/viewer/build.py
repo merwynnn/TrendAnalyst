@@ -36,6 +36,8 @@ from sqlalchemy.orm import Session
 
 from config.categories import default_taxonomy
 from config.settings import ConfigError, default_config_dir, load_settings
+from trend_analyst.llm.cache import token_spend_by_gate
+from trend_analyst.llm.gates import latest_judgements
 from trend_analyst.pipeline.layers.l3 import load_attention_points
 from trend_analyst.scoring.features import extract_features
 from trend_analyst.scoring.revenue import MODEL_V1
@@ -44,7 +46,15 @@ from trend_analyst.store.db import (
     create_db_engine,
     create_session_factory,
 )
-from trend_analyst.store.models import Candidate, Run, RunSourceLog, Score, SignalRow, Source
+from trend_analyst.store.models import (
+    Candidate,
+    Judgement,
+    Run,
+    RunSourceLog,
+    Score,
+    SignalRow,
+    Source,
+)
 from trend_analyst.store.snapshots import RankedScore, latest_ranked
 
 __all__ = ["ViewData", "build_view", "main", "render_page"]
@@ -69,6 +79,8 @@ class ViewData:
     runs: list[dict[str, Any]] = field(default_factory=list)
     sources: list[dict[str, Any]] = field(default_factory=list)
     items: list[dict[str, Any]] = field(default_factory=list)
+    #: Gate outcomes and spend, per gate — the brief's "gates pass" panel.
+    gates: dict[str, Any] = field(default_factory=dict)
     pending: dict[str, str] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
@@ -80,6 +92,7 @@ class ViewData:
             "runs": self.runs,
             "sources": self.sources,
             "items": self.items,
+            "gates": self.gates,
             "pending": self.pending,
         }
 
@@ -213,12 +226,74 @@ def _score_history(session: Session, candidate_id: int) -> list[dict[str, Any]]:
     ]
 
 
+def _judgement_view(row: Judgement | None) -> dict[str, Any] | None:
+    """One candidate's newest gate verdict, as the page renders it."""
+    if row is None:
+        return None
+    return {
+        "gate": str(row.gate),
+        "decision": str(row.decision),
+        "confidence": round(float(row.confidence), 3),
+        "fad_label": row.fad_label,
+        "fad_probability": round(float(row.fad_probability), 4)
+        if row.fad_probability is not None
+        else None,
+        "reason": str(row.reason or ""),
+        "quotes": [
+            {
+                "text": str(quote.get("text", "")),
+                "url": str(quote.get("url", "")),
+                "source_id": str(quote.get("source_id", "")),
+            }
+            for quote in (row.quotes or [])
+            if isinstance(quote, dict)
+        ],
+        "enrich": [str(item) for item in (row.enrich or [])],
+        "ungrounded": bool(row.ungrounded),
+        "dropped_quotes": int(row.dropped_quotes),
+        "provider": str(row.provider),
+        "model": str(row.model),
+        "prompt_tokens": int(row.prompt_tokens),
+        "completion_tokens": int(row.completion_tokens),
+        "created_at": _iso(row.created_at),
+    }
+
+
+def _gates_view(session: Session) -> dict[str, Any]:
+    """The gate summary: how many verdicts, how they split, what it cost, what was stripped."""
+    rows = session.execute(
+        select(Judgement).order_by(Judgement.created_at.desc()).limit(1000)
+    ).scalars().all()
+    judgements: list[dict[str, Any]] = [
+        view for view in (_judgement_view(row) for row in rows) if view is not None
+    ]
+    spend = token_spend_by_gate(session)
+    decisions: dict[str, int] = {}
+    models: dict[str, int] = {}
+    for entry in judgements:
+        decisions[str(entry["decision"])] = decisions.get(str(entry["decision"]), 0) + 1
+        key = f"{entry['provider']}:{entry['model']}"
+        models[key] = models.get(key, 0) + 1
+    return {
+        "judgements": len(judgements),
+        "decisions": decisions,
+        "models": models,
+        "ungrounded": sum(1 for entry in judgements if entry["ungrounded"]),
+        "quotes_stripped": sum(int(entry["dropped_quotes"]) for entry in judgements),
+        "prompt_tokens": sum(int(entry["prompt_tokens"]) for entry in judgements),
+        "completion_tokens": sum(int(entry["completion_tokens"]) for entry in judgements),
+        "token_log": spend,
+        "latest": judgements[:8],
+    }
+
+
 def _item(
     session: Session,
     ranked: RankedScore,
     *,
     as_of: datetime,
     taxonomy_by_id: dict[str, Any],
+    judgement: Judgement | None = None,
 ) -> dict[str, Any]:
     """One candidate, fully unpacked: stored decision + recomputed evidence + provenance."""
     category = taxonomy_by_id.get(ranked.category)
@@ -253,6 +328,8 @@ def _item(
         },
         # --- recomputed: what the lake holds now, labelled as such on the page ---
         "evidence": evidence,
+        # --- the gate's advice, when a gate has run: verdict, reason, cited quotes, enrich plan ---
+        "judge": _judgement_view(judgement),
         "history": _score_history(session, ranked.candidate_id),
         # --- the phases that will fill these ---
         "pending": {
@@ -299,6 +376,7 @@ def build_view(
     # which reads as a bug in the scorer rather than as history. History is one flag away.
     current_run = _newest_scored_run(session) if not all_runs else None
     ranked = latest_ranked(session, limit=limit, run_id=current_run.id if current_run else None)
+    judgements = latest_judgements(session, limit=limit)
     view_run = (
         {
             "run_id": str(current_run.id),
@@ -314,7 +392,14 @@ def build_view(
         else {"scope": "every run (newest snapshot per candidate)"}
     )
     items = [
-        _item(session, row, as_of=resolved_as_of, taxonomy_by_id=taxonomy_by_id) for row in ranked
+        _item(
+            session,
+            row,
+            as_of=resolved_as_of,
+            taxonomy_by_id=taxonomy_by_id,
+            judgement=judgements.get(row.candidate_id),
+        )
+        for row in ranked
     ]
 
     run_rows = session.execute(
@@ -386,6 +471,7 @@ def build_view(
         "sources": len(sources),
         "sources_enabled": sum(1 for source in sources if source["enabled"]),
         "runs": count_of(Run),
+        "judgements": count_of(Judgement),
     }
 
     return ViewData(
@@ -393,6 +479,7 @@ def build_view(
         as_of=resolved_as_of.isoformat(),
         counts=counts,
         view_run=view_run,
+        gates=_gates_view(session),
         runs=runs,
         sources=sources,
         items=items,
