@@ -126,6 +126,7 @@
         <th class="num" data-k="fe">FE</th>
         <th data-k="fad">fad</th>
         <th data-k="judge">judge</th>
+        <th data-k="brief">brief</th>
         <th class="num" data-k="p90">$/mo (P10–P50–P90)</th>
         <th data-k="phrase">phrase</th>
         <th data-k="category">category</th>
@@ -166,6 +167,11 @@
       <th>run</th><th>started</th><th>finished</th><th>status</th><th>trigger</th>
       <th>layer status</th><th>notes</th>
     </tr></thead><tbody id="runs"></tbody></table>
+  </section>
+
+  <section>
+    <h2>About this page</h2>
+    <div class="grid" id="notes"></div>
   </section>
 
   <section>
@@ -256,6 +262,9 @@ function rows() {
         ? `<span class="pill ${it.judge.decision === 'keep' ? 'ok' : 'failed'}">${esc(it.judge.decision)}</span>` +
           (it.judge.ungrounded ? ' <span class="pill fad">no cite</span>' : '')
         : '<span class="pill never_run">not judged</span>'}</td>
+      <td>${it.brief
+        ? `<span class="pill ${it.brief.ungrounded ? 'fad' : 'ok'}">${it.brief.words}w</span>`
+        : '<span class="pill never_run">—</span>'}</td>
       <td class="num">${money(s.revenue.p10)}–${money(s.revenue.p50)}–${money(s.revenue.p90)}</td>
       <td><b>${esc(it.phrase)}</b></td>
       <td>${esc(it.category_label)}</td>
@@ -301,6 +310,35 @@ function judgeBlock(judge) {
       <h4>Requested enrichment (Tier-A, P4)</h4>
       ${judge.enrich.length ? judge.enrich.map((item) => `<span class="pill">${esc(item)}</span>`).join(' ')
         : '<div class="pending">the gate asked for nothing specific</div>'}
+    </div>`;
+}
+
+function briefBlock(brief) {
+  if (!brief) {
+    return `<div class="pending"><b>no brief yet</b> — the Writer gate writes one per kept
+      candidate: <span class="tag">--write-replay tests/data/llm/writer_brief.json</span> (offline)
+      or <span class="tag">--write</span> (live, uses tokens).</div>`;
+  }
+  const citations = brief.citations.length
+    ? brief.citations.map((c) => `<div class="quote"><em>“${esc(c.text)}”</em>
+        ${c.url ? `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.url)}</a>` : ''}</div>`).join('')
+    : `<div class="pending"><b>no citation survived grounding</b> — the stored brief is shown
+      below, but nothing in it could be traced to a source. Treat it as unverified text.</div>`;
+  return `
+    <div class="detail">
+      <h4>Brief — the Writer's one-pager</h4>
+      ${kv([
+        ['verdict', `<span class="pill ${brief.ungrounded ? 'fad' : 'ok'}">${esc(brief.verdict || '—')}</span>`],
+        ['grounded', brief.ungrounded ? '<span class="pill fad">no</span>' : '<span class="pill ok">yes</span>'],
+        ['model', esc(brief.model || '—')],
+        ['tokens', String(brief.tokens)],
+        ['words', String(brief.words)],
+        ['written', esc(brief.created_at)],
+      ])}
+      <div class="quote" style="border-left-color:var(--good)">
+        <strong>stored markdown</strong><br>${esc(brief.body_md)}</div>
+      <h4 style="margin-top:10px">Citations</h4>
+      ${citations}
     </div>`;
 }
 
@@ -397,6 +435,9 @@ function detail(it) {
         </div>
       </div>
 
+      <h4 style="margin:16px 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim)">Brief (Writer gate)</h4>
+      <div class="grid">${briefBlock(it.brief)}</div>
+
       <h4 style="margin:16px 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim)">Gate advice (LLM judge)</h4>
       <div class="grid">${judgeBlock(it.judge)}</div>
 
@@ -471,6 +512,10 @@ function gates() {
 }
 
 function pending() {
+  const notes = document.getElementById('notes');
+  if (notes) {
+    notes.innerHTML = (DATA.notes || []).map((n) => `<div class="pending"><b>note</b> — ${esc(n)}</div>`).join('');
+  }
   document.getElementById('pending').innerHTML = Object.entries(DATA.pending).map(([k, v]) =>
     `<div class="pending"><b>${esc(k)}</b> — ${esc(v)}</div>`).join('');
 }

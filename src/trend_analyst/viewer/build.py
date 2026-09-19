@@ -47,7 +47,9 @@ from trend_analyst.store.db import (
     create_session_factory,
 )
 from trend_analyst.store.models import (
+    Brief,
     Candidate,
+    EvalCase,
     Judgement,
     Run,
     RunSourceLog,
@@ -81,6 +83,9 @@ class ViewData:
     items: list[dict[str, Any]] = field(default_factory=list)
     #: Gate outcomes and spend, per gate — the brief's "gates pass" panel.
     gates: dict[str, Any] = field(default_factory=dict)
+    #: Facts the page must state rather than imply (for example: briefs that exist but are not
+    #: visible from this run's view). Empty means "nothing to warn about".
+    notes: list[str] = field(default_factory=list)
     pending: dict[str, str] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
@@ -93,6 +98,7 @@ class ViewData:
             "sources": self.sources,
             "items": self.items,
             "gates": self.gates,
+            "notes": self.notes,
             "pending": self.pending,
         }
 
@@ -330,14 +336,44 @@ def _item(
         "evidence": evidence,
         # --- the gate's advice, when a gate has run: verdict, reason, cited quotes, enrich plan ---
         "judge": _judgement_view(judgement),
+        # --- the Writer's one-pager, when one was stored (stored, not recomputed) ---
+        "brief": _brief_view(session, ranked.candidate_id),
         "history": _score_history(session, ranked.candidate_id),
         # --- the phases that will fill these ---
         "pending": {
             "judge": "P3 — keep/drop verdict with cited quotes",
-            "quotes": "P3 — grounding-enforced quotes with URLs",
-            "market": "P4 — sold-vs-listed, review counts, price distribution (Tier-A)",
-            "brief": "P5 — Writer one-pager: verdict, players, risks, angles",
+            "market": (
+                "Tier-A market data (sold-vs-listed, review counts, price distribution) — the "
+                "plugin and its budget exist, but no Tier-A credential is configured, so nothing "
+                "has been collected"
+            ),
         },
+    }
+
+
+def _brief_view(session: Session, candidate_id: int) -> dict[str, Any] | None:
+    """The Writer's brief for this candidate, if one was stored (P4's Writer gate)."""
+    row = session.execute(
+        select(Brief)
+        .where(Brief.candidate_id == candidate_id)
+        .order_by(Brief.created_at.desc(), Brief.id.desc())
+        .limit(1)
+    ).scalars().first()
+    if row is None:
+        return None
+    body = str(row.body_md or "")
+    return {
+        "verdict": str(row.verdict or ""),
+        "body_md": body,
+        "citations": list(row.citations or []),
+        "model": str(row.model or ""),
+        "created_at": _iso(row.created_at),
+        "tokens": int(row.prompt_tokens or 0) + int(row.completion_tokens or 0),
+        # The grounding rule can strip every citation from a brief; when that happened the text is
+        # still shown, labelled, because a brief with no citations is evidence of a problem rather
+        # than something to hide.
+        "ungrounded": "UNGROUNDED" in body.upper() or not row.citations,
+        "words": len(body.split()),
     }
 
 
@@ -472,7 +508,26 @@ def build_view(
         "sources_enabled": sum(1 for source in sources if source["enabled"]),
         "runs": count_of(Run),
         "judgements": count_of(Judgement),
+        "briefs": count_of(Brief),
+        "briefs_shown": sum(1 for item in items if item.get("brief")),
+        "evals": count_of(EvalCase),
     }
+
+    # A brief whose candidate was last scored in an older run does not appear in the default view.
+    # Saying so is the difference between "no briefs exist" and "no brief is visible from here" —
+    # the same distinction the rest of this page refuses to blur.
+    notes: list[str] = []
+    hidden_briefs = int(counts["briefs"]) - int(counts["briefs_shown"])
+    if hidden_briefs > 0 and not all_runs:
+        notes.append(
+            f"{hidden_briefs} stored brief(s) belong to candidates last scored in an older run; "
+            "rebuild with --all-runs to see them"
+        )
+    if int(counts["evals"]) and not all_runs:
+        notes.append(
+            f"{counts['evals']} golden eval case(s) exist; read them with "
+            "`uv run python -m evals.run_evals`"
+        )
 
     return ViewData(
         generated_at=datetime.now(UTC).isoformat(),
@@ -483,15 +538,21 @@ def build_view(
         runs=runs,
         sources=sources,
         items=items,
+        notes=notes,
         pending={
-            "judge": "P3 — batched LLM keep/drop with cited quotes (nothing stored yet)",
-            "enrich": (
-                "P4 — Tier-A market data: sold-vs-listed counts, review volume, prices "
-                "(no Tier-A source is enabled yet)"
+            "judge": (
+                "most candidates have no Judge verdict yet: the gate runs on demand "
+                "(`--judge-replay` offline, `--judge` live) and each live run costs tokens"
             ),
-            "brief": "P5 — Writer briefs, linked to a score snapshot",
-            "alerts": "P5 — monitor alerts and incident runbooks",
-            "evals": "P5 — the eval runner over the 10 seeded golden cases",
+            "market": (
+                "Tier-A market data: sold-vs-listed counts, review volume, prices. The eBay plugin "
+                "and its budget exist, but no Tier-A credential is configured, so nothing has been "
+                "collected and no number here would be real"
+            ),
+            "alerts": (
+                "monitor alerts are readable outside the page: "
+                "`uv run python -m trend_analyst.monitor.alerts`"
+            ),
         },
     )
 

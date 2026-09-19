@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -28,7 +29,13 @@ from trend_analyst.net import RecordedHttpClient, fixture_path
 from trend_analyst.pipeline.orchestrator import run_l0
 from trend_analyst.sources.base import FixedClock
 from trend_analyst.sources.registry import default_registry_path, load_registry
-from trend_analyst.store.models import SignalRow
+from trend_analyst.store.models import (
+    Brief,
+    Candidate,
+    Run,
+    Score,
+    SignalRow,
+)
 from trend_analyst.viewer.build import ViewData, build_view, render_page
 
 pytestmark = pytest.mark.db
@@ -134,6 +141,126 @@ def test_evidence_matches_a_phrase_that_lives_in_a_post_body(
             assert data.counts["signals"] > 0
             return
     pytest.skip("no probe phrase appears in the recorded bodies")
+
+
+def _scored_candidate(
+    session: Session,
+    phrase: str,
+    *,
+    when: datetime,
+    with_brief: bool = False,
+) -> None:
+    """A candidate with a score snapshot in its own run, optionally with a brief attached.
+
+    A brief cannot exist without the snapshot it was written from (`briefs.score_id` is not null),
+    which is the schema saying what §7 says: the prose is tied to the numbers it justified. `when`
+    is explicit because the page's default view is the *newest* run with snapshots — the whole point
+    of the "hidden brief" case is a brief attached to an older run.
+    """
+    run = Run(
+        id=uuid.uuid4(),
+        started_at=when,
+        finished_at=when,
+        status="ok",
+        trigger="nightly",
+        layer_status={"L3": {"status": "ok"}},
+    )
+    session.add(run)
+    session.flush()
+    candidate = Candidate(
+        phrase=phrase,
+        category="tools_diy",
+        status="briefed" if with_brief else "kept",
+        first_seen_at=when,
+    )
+    session.add(candidate)
+    session.flush()
+    score = Score(
+        candidate_id=candidate.id,
+        run_id=run.id,
+        weights_version="v1",
+        demand_velocity=50.0,
+        saturation=50.0,
+        buyer_pain=60.0,
+        money=70.0,
+        feasibility=75.0,
+        mgs=55.0,
+        fad_label="trend",
+        fad_probability=0.5,
+        revenue_p10=10.0,
+        revenue_p50=100.0,
+        revenue_p90=400.0,
+        scored_at=when,
+    )
+    session.add(score)
+    session.flush()
+    if with_brief:
+        session.add(
+            Brief(
+                score_id=score.id,
+                candidate_id=candidate.id,
+                run_id=run.id,
+                verdict="worth building",
+                body_md="# " + phrase + "\n\nUNGROUNDED draft body",
+                citations=[],
+                model="gemini:gemini-flash-latest",
+                prompt_tokens=10,
+                completion_tokens=20,
+            )
+        )
+        session.flush()
+
+
+def test_a_stored_brief_is_shown_with_its_grounding_state(
+    lake: sessionmaker[Session], repo_root: Path
+) -> None:
+    """The Writer's brief appears, labelled — and an ungrounded one is *labelled*, not hidden.
+
+    The brief rendered here has no surviving citations, which is the interesting case: the prose
+    survives while nothing in it can be traced to a source. Showing it without saying so would be
+    the dishonest version of this feature.
+    """
+    with lake() as session:
+        _scored_candidate(
+            session, "drill brief phrase", when=datetime.now(UTC), with_brief=True
+        )
+        data = build_view(session, config_dir=repo_root / "config", all_runs=True)
+
+    item = next((row for row in data.items if row["phrase"] == "drill brief phrase"), None)
+    assert item is not None, "a briefed candidate must appear when every run is included"
+    brief = item.get("brief")
+    assert brief is not None
+    assert brief["ungrounded"] is True  # no citations survived grounding
+    assert brief["words"] > 0
+    assert brief["tokens"] == 30
+    assert brief["citations"] == []
+
+    html = render_page(data)
+    assert "briefBlock" in html  # the renderer ships with the page
+    assert "drill brief phrase" in html
+
+
+def test_the_page_says_what_is_missing_rather_than_implying_it(
+    lake: sessionmaker[Session], repo_root: Path
+) -> None:
+    """A brief outside the shown run must be reported, not silently absent.
+
+    The default view is the newest decide run; a briefed candidate scored in an older run is
+    invisible from there. "No briefs exist" and "no brief is visible from this run" are different
+    facts, and the page has to state the second one.
+    """
+    older = datetime.now(UTC) - timedelta(days=3)
+    newer = datetime.now(UTC) - timedelta(days=1)
+    with lake() as session:
+        # The brief belongs to the older night; tonight's run scored a different candidate, so the
+        # default view cannot show the brief and must say so.
+        _scored_candidate(session, "older-run phrase", when=older, with_brief=True)
+        _scored_candidate(session, "tonights phrase", when=newer)
+        data = build_view(session, config_dir=repo_root / "config")
+        assert data.counts["briefs"] == 1
+        assert data.counts["briefs_shown"] == 0
+        assert any("--all-runs" in note for note in data.notes), data.notes
+        assert "market" in data.pending  # Tier-A data is honest about being uncollected
 
 
 def test_html_escapes_everything_that_came_from_the_internet(repo_root: Path) -> None:
