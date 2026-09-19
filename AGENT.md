@@ -43,6 +43,10 @@ bash scripts/provision_pg.sh     # idempotent re-provision (role, database, pgve
 uv run alembic upgrade head
 uv run alembic check          # zero drift between models and migrations
 uv run alembic downgrade -1
+TA_MIGRATION_TRACE=1 uv run alembic upgrade head   # where did a migration stop?
+
+# After a schema change: uv run alembic revision --autogenerate -m "what changed"
+# Then ALWAYS: upgrade -> check -> downgrade base -> upgrade (the round trip)
 
 # Run a pipeline layer from a checkpoint (P1+)
 uv run python -m trend_analyst.pipeline.orchestrator --layers L0 --resume

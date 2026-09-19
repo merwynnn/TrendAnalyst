@@ -15,8 +15,14 @@ phases that create them.
 | Password + DSN written where? | — | `config/secrets.local.yaml` (untracked, never committed) |
 | Stop / start manually | `wsl -d Ubuntu -u root -- pg_ctlcluster 18 main stop\|start` | cluster status line |
 
+The provisioning script creates **two** databases: `trend_analyst` (yours) and
+`trend_analyst_test` (the test suite's — so a test can migrate up and down without ever
+touching your data).
+
 Nothing is exposed outside this machine: Postgres listens on WSL's localhost, which
-Windows reaches at `127.0.0.1:5432`.
+Windows reaches at `127.0.0.1:5432`. Use the address literal, not `localhost`: on Windows
+`localhost` prefers IPv6 `::1`, which WSL does not forward, and every connection then
+waits ~130 s before falling back (README D8).
 
 ## 2. Credentials
 
@@ -101,8 +107,9 @@ If any line reads `DOWN` or the exit code is not `0`, jump to §6.
 
 | # | Symptom | Fix |
 |---|---|---|
-| 1 | `connection refused` on 5432 | The WSL cluster isn't running (WSL restarts stop it): `wsl -d Ubuntu -u root -- pg_ctlcluster 18 main start` |
+| 1 | `connection refused` on 5432 | The WSL cluster isn't running (WSL restarts stop it): `wsl -d Ubuntu -u root -- pg_ctlcluster 18 main start` — or just `bash scripts/db_up.sh`, which also parks the keep-alive |
 | 2 | `password authentication failed for user "trend_analyst"` | Re-run `scripts/provision_pg.sh` — it re-syncs the password in the DB *and* in `config/secrets.local.yaml` |
-| 3 | `config/secrets.local.yaml` missing | `cp config/secrets.example.yaml config/secrets.local.yaml`, then re-run the provisioning script to fill the DSN |
-| 4 | A provider key is rejected / quota is zero on day one | Key stays blank in the secrets file; the source is `enabled: false`. Nothing else fails — leave it disabled and file the approval |
-| 5 | `uv sync` tries to download a Python build | It must not: use `UV_PYTHON_DOWNLOADS=never UV_NO_MANAGED_PYTHON=1 uv sync` (the venv is built from the system interpreter 3.14.6) |
+| 3 | A connection or `alembic` command **hangs for ~2 minutes** | You are reaching Postgres over IPv6: `localhost` resolves to `::1` first on Windows and WSL black-holes it, so the client waits for the TCP timeout before falling back to IPv4. Use `127.0.0.1` in the DSN (the generated one does), and run migrations with `TA_MIGRATION_TRACE=1` if you need to see where a migration stopped |
+| 4 | `config/secrets.local.yaml` missing | `cp config/secrets.example.yaml config/secrets.local.yaml`, then re-run the provisioning script to fill the DSN |
+| 5 | A provider key is rejected / quota is zero on day one | Key stays blank in the secrets file; the source is `enabled: false`. Nothing else fails — leave it disabled and file the approval |
+| 6 | `uv sync` tries to download a Python build | It must not: use `UV_PYTHON_DOWNLOADS=never UV_NO_MANAGED_PYTHON=1 uv sync` (the venv is built from the system interpreter 3.14.6) |

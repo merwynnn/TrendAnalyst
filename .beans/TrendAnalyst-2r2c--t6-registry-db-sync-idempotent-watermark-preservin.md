@@ -1,11 +1,11 @@
 ---
 # TrendAnalyst-2r2c
 title: T6 — Registry -> DB sync (idempotent, watermark-preserving)
-status: todo
+status: in-progress
 type: task
 priority: high
 created_at: 2026-09-19T11:42:42Z
-updated_at: 2026-09-19T11:42:43Z
+updated_at: 2026-09-19T14:00:02Z
 parent: TrendAnalyst-l15l
 blocked_by:
     - TrendAnalyst-xpnf

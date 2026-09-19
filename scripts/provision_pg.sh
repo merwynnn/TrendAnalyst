@@ -19,7 +19,13 @@ PROJ="${TREND_ANALYST_PROJECT:-/mnt/c/Users/Louis/Documents/Projects/TrendAnalys
 SECRETS="$PROJ/config/secrets.local.yaml"
 DB_USER="trend_analyst"
 DB_NAME="trend_analyst"
-DB_HOST="localhost"
+#: The test suite runs against its own database so a test can migrate up and down
+#: freely without ever touching dev data (see tests/conftest.py).
+DB_TEST_NAME="trend_analyst_test"
+#: 127.0.0.1, never `localhost`: on Windows `localhost` resolves to IPv6 ::1 first, and
+#: WSL's port relay black-holes ::1 — every connection then burns ~130 s before falling
+#: back to IPv4. Measured: 130.09 s as `localhost`, 0.06 s as `127.0.0.1`.
+DB_HOST="127.0.0.1"
 DB_PORT="5432"
 PG_VERSION="18"
 
@@ -58,17 +64,25 @@ END
 SQL
 log "role ready: ${DB_USER}"
 
-# --- 4. database --------------------------------------------------------------
-if runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
-  log "database exists: ${DB_NAME}"
-else
-  runuser -u postgres -- createdb -O "${DB_USER}" "${DB_NAME}"
-  log "database created: ${DB_NAME}"
-fi
+# --- 4. databases -------------------------------------------------------------
+for database in "$DB_NAME" "$DB_TEST_NAME"; do
+  if runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname='${database}'" | grep -q 1; then
+    log "database exists: ${database}"
+  else
+    runuser -u postgres -- createdb -O "${DB_USER}" "${database}"
+    log "database created: ${database}"
+  fi
+
+done
 
 # --- 5. pgvector --------------------------------------------------------------
-runuser -u postgres -- psql -v ON_ERROR_STOP=1 -q -d "${DB_NAME}" \
-  -c "CREATE EXTENSION IF NOT EXISTS vector"
+# pgvector is not a "trusted" extension, so CREATE EXTENSION needs superuser. Doing it
+# here (rather than letting migration 0001 try) is what lets the app role run the
+# migrations on a machine where it has no superuser.
+for database in "$DB_NAME" "$DB_TEST_NAME"; do
+  runuser -u postgres -- psql -v ON_ERROR_STOP=1 -q -d "${database}" \
+    -c "CREATE EXTENSION IF NOT EXISTS vector"
+done
 log "pgvector: $(runuser -u postgres -- psql -tAc "SELECT extname||' '||extversion FROM pg_extension WHERE extname='vector'" -d "${DB_NAME}")"
 
 # --- 6. secrets file (untracked) ---------------------------------------------
