@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------------------
+# SECRETS — never commit. Keys live in config/secrets.local.yaml (see .env.example).
+# ---------------------------------------------------------------------------
+config/secrets.local.yaml
+config/secrets.*.yaml
+!config/secrets.example.yaml
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ---------------------------------------------------------------------------
+# Runtime output (logs, monitor outbox, scratch)
+# ---------------------------------------------------------------------------
+.dossier/
+logs/
+outbox/
+*.log
+
+# ---------------------------------------------------------------------------
+# OS / editor
+# ---------------------------------------------------------------------------
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/
