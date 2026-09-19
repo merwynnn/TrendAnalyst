@@ -1,3 +1,3 @@
-"""The three LLM gates and their plumbing: gateway, cache, gates, schemas (spec §6.2-6.3)."""
+"""The LLM gates: one gateway, one cache, three schemas, grounding enforced in code (spec §6)."""
 
 from __future__ import annotations
