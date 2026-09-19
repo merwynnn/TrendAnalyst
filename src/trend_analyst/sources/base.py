@@ -29,7 +29,7 @@ import importlib
 import inspect
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import ModuleType
@@ -41,6 +41,9 @@ from trend_analyst.pipeline.layers import SourceLayer
 from trend_analyst.sources.registry import Schedule, SourceEntry, Tier
 
 __all__ = [
+    "HTTP_CLIENT_ERROR",
+    "HTTP_NOT_FOUND",
+    "HTTP_OK",
     "Clock",
     "Decision",
     "FetchContext",
@@ -52,6 +55,7 @@ __all__ = [
     "Signal",
     "SourceBudget",
     "SourcePlugin",
+    "SourceSkippedError",
     "SystemClock",
     "TokenBucket",
     "content_hash",
@@ -67,8 +71,28 @@ _RATE_LIMIT_STATUS: Final = 429
 _SUCCESS_STATUSES: Final = range(200, 300)
 
 
+#: HTTP statuses plugins reason about by name rather than by number.
+HTTP_OK: Final = 200
+HTTP_CLIENT_ERROR: Final = 400
+HTTP_NOT_FOUND: Final = 404
+
+
 class PluginContractError(RuntimeError):
     """A plugin that does not honour the contract, or disagrees with the registry."""
+
+
+class SourceSkippedError(RuntimeError):
+    """A source is not run this time, for a reason the ledger must record verbatim.
+
+    Raised instead of returning an empty batch, because "we skipped this" and "this
+    returned nothing" are different facts, and the health CLI reports them differently.
+    The budget path uses it (spec §4.3: quota exhausted, or backing off after a 429), and
+    so does a source that has nothing to do this pass.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +199,10 @@ class RawBatch(BaseModel):
     cursor: str | None = None
     status_codes: tuple[int, ...] = ()
     request_count: int = 0
+    #: The source itself reports there is nothing new since the stored cursor (the HTTP
+    #: 304 idea, applied to a watermark). The orchestrator then skips parsing, scoring and
+    #: the LLM entirely — which is what makes a second run nearly free (spec §5.1-5.2).
+    not_modified: bool = False
 
     _check_fetched_at = field_validator("fetched_at")(_require_aware)
 
@@ -212,6 +240,7 @@ class RawBatch(BaseModel):
         cursor: str | None = None,
         status_codes: tuple[int, ...] = (),
         request_count: int | None = None,
+        not_modified: bool = False,
     ) -> RawBatch:
         """Build a batch, counting requests when the caller does not."""
         return cls(
@@ -221,6 +250,7 @@ class RawBatch(BaseModel):
             cursor=cursor,
             status_codes=status_codes,
             request_count=len(parts) if request_count is None else request_count,
+            not_modified=not_modified,
         )
 
 
@@ -352,6 +382,7 @@ class SourceBudget:
         max_backoff_s: float = 900.0,
         backoff_base_s: float = 30.0,
         burst: float = 1.0,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         if budget_per_day <= 0:
             raise ValueError("budget_per_day must be > 0")
@@ -363,6 +394,7 @@ class SourceBudget:
         self.max_backoff_s = max_backoff_s
         self.backoff_base_s = backoff_base_s
         self._clock = clock
+        self._sleep = sleep or time.sleep
         self._bucket = TokenBucket(rate_per_second=rps, capacity=max(burst, 1.0), clock=clock)
         self._spent = 0
         self._rate_limit_hits = 0
@@ -370,6 +402,32 @@ class SourceBudget:
         self._backoff_s = backoff_base_s
 
     # -- decisions ---------------------------------------------------------
+    def acquire(self, *, max_wait_s: float = 5.0) -> Decision:
+        """Ask permission, WAITING politely for a rate-limit slot (up to `max_wait_s`).
+
+        The waiting is the point. A bucket that refuses the moment the rate is saturated
+        makes a polite crawler silently collect a fraction of what it intended — measured
+        while recording fixtures: 3 of 15 subreddits were fetched, then every further
+        attempt was refused. Waiting is what "2 requests per second" means.
+
+        It does NOT wait out a backoff or a budget refusal: those are decisions about the
+        source rather than about timing, and the caller must react to them.
+        """
+        deadline = self._clock.monotonic() + max_wait_s
+        # A bounded loop as well as a deadline: if a caller injects a clock whose monotonic
+        # time does not advance with sleep, the deadline never arrives and this would spin
+        # forever. A wrong clock must not become a hung pipeline.
+        max_attempts = int(max_wait_s * self.rps) + 2
+        for _ in range(max_attempts):
+            decision = self.try_acquire()
+            if decision != "rate_limited":
+                return decision
+            now = self._clock.monotonic()
+            if now >= deadline:
+                return "rate_limited"
+            self._sleep(min(1.0 / self.rps, deadline - now))
+        return "rate_limited"
+
     def try_acquire(self) -> Decision:
         """Ask permission for one request. Counts it against the budget when granted."""
         now = self._clock.monotonic()

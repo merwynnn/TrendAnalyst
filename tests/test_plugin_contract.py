@@ -482,12 +482,22 @@ def test_plugin_must_implement_fetch_and_parse() -> None:
 
 
 def test_load_plugin_reports_a_module_with_no_plugin_yet(repo_root: Path) -> None:
-    """The 22 plugin modules are still stubs; the loader must say so precisely."""
+    """Most plugin modules are still stubs; the loader must say which source, precisely."""
     registry = load_registry(repo_root / "config" / "sources.yaml")
-    entry = registry.by_id("hn_firebase")
+    entry = registry.by_id("gdelt_doc")  # P1 implements hn/wiki/arctic_shift only
 
-    with pytest.raises(PluginContractError, match="defines no SourcePlugin with id='hn_firebase'"):
+    with pytest.raises(PluginContractError, match="defines no SourcePlugin with id='gdelt_doc'"):
         load_plugin(entry)
+
+
+def test_load_plugin_returns_an_implemented_collector(repo_root: Path) -> None:
+    """The other half of the lifecycle: a module that IS implemented loads and validates."""
+    registry = load_registry(repo_root / "config" / "sources.yaml")
+
+    plugin = load_plugin(registry.by_id("hn_firebase"))
+
+    assert isinstance(plugin, SourcePlugin)
+    assert plugin.id == "hn_firebase"
 
 
 def test_load_plugin_imports_validates_and_instantiates(

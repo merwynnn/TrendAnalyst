@@ -49,6 +49,7 @@ __all__ = [
     "RegistryError",
     "Schedule",
     "SourceEntry",
+    "SourceLayer",
     "Tier",
     "default_registry_path",
     "load_registry",
