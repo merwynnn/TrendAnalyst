@@ -1,0 +1,32 @@
+{
+  "completion_tokens": 0,
+  "gate": "writer",
+  "model": "hand-written-example",
+  "output": {
+    "angles": [
+      "a retrofit guard with a tool-free release",
+      "a base-plate squareness jig"
+    ],
+    "phrase": "circ saw",
+    "players": [
+      "Established circular-saw brands",
+      "Marketplace house brands"
+    ],
+    "quotes": [
+      {
+        "source_id": "arctic_shift",
+        "text": "the blade guard on my circ saw broke in a week",
+        "url": "https://www.reddit.com/r/Tools/comments/abc/circ_saw_guard/"
+      }
+    ],
+    "revenue_reasoning": "At a $90 median and a 5% conversion on a modest monthly reach, the P50 stays near $180 and the P90 depends almost entirely on whether the demand is durable rather than a spike.",
+    "risks": [
+      "the guard is a safety component, so certification costs",
+      "seasonal demand"
+    ],
+    "verdict": "The gap is real but narrow: buyers repeatedly criticise the blade guard and the base plate, and the price band supports a $70-110 product. The failure mode is a market that a single well-known incumbent can close in one revision."
+  },
+  "prompt_tokens": 0,
+  "recorded_at": "2026-09-19T17:28:54.762230+00:00",
+  "source": "hand-written: no live Writer call has been made (the provider quota is spent), so this fixture exercises the replay path and claims no real answer"
+}

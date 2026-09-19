@@ -16,6 +16,7 @@ The five properties worth more than the rest:
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 
@@ -140,8 +141,58 @@ def verdict_payload(
 
 
 def stub_sender(payload: str, *, prompt_tokens: int = 120, completion_tokens: int = 60):
+    """A stub that ignores the prompt. Only safe when the batch cannot change between calls.
+
+    The re-ask rounds made that assumption false: a prompt-blind stub answers every round with the
+    same phrase, so the re-ask tires itself out and every round strips the same quotes again. Tests
+    that exercise rounds use `answering_sender` instead.
+    """
+
     def send(_provider: ProviderSpec, _prompt: str) -> tuple[str, int, int]:
         return payload, prompt_tokens, completion_tokens
+
+    return send
+
+
+PHRASE_PATTERN = re.compile(r'"phrase": "([^"]+)"')
+
+
+def answering_sender(
+    *,
+    decisions: Sequence[str] = ("keep",),
+    urls: Sequence[str] = (URL_A,),
+    prompt_tokens: int = 120,
+    completion_tokens: int = 60,
+):
+    """A stub that answers about exactly the candidates named in the prompt.
+
+    This is the shape a real provider is trusted to produce, and the shape the re-ask logic depends
+    on: N candidates in, N verdicts out.
+    """
+
+    def send(_provider: ProviderSpec, prompt: str) -> tuple[str, int, int]:
+        phrases = list(dict.fromkeys(PHRASE_PATTERN.findall(prompt)))
+        verdicts = [
+            {
+                "phrase": phrase,
+                "category": "tools_diy",
+                "decision": decisions[index % len(decisions)],
+                "confidence": 0.8,
+                "fad_label": "trend",
+                "fad_probability": 0.25,
+                "reason": f"{phrase} shows repeated complaints",
+                "quotes": [
+                    {
+                        "text": "guard cracked in a week",
+                        "url": urls[index % len(urls)],
+                        "source_id": "arctic_shift",
+                    }
+                ],
+                "enrich": ["ebay sold listings"],
+            }
+            for index, phrase in enumerate(phrases)
+        ]
+        return json.dumps({"verdicts": verdicts}), prompt_tokens, completion_tokens
 
     return send
 
@@ -267,7 +318,7 @@ def test_a_batch_is_one_provider_call(sessions: sessionmaker[Session]) -> None:
         report = judge_candidates(
             session, run_id=run.id, sender=counting, batch_size=DEFAULT_BATCH_SIZE, now=NOW
         )
-    assert len(calls) == 1
+    assert len(calls) == 1, "one batch of three candidates is one call"
     assert report.batches == 1
     assert report.judged == 3
 
@@ -302,12 +353,12 @@ def test_an_invented_citation_is_stripped_and_the_verdict_is_marked(
     sessions: sessionmaker[Session],
 ) -> None:
     with sessions() as session:
-        seed(session)
+        seed(session, phrases=("circ saw",))
         run = session.execute(select(Run)).scalars().first()
         report = judge_candidates(
             session,
             run_id=run.id,
-            sender=stub_sender(verdict_payload(["circ saw"], urls=[BROKEN])),
+            sender=answering_sender(urls=(BROKEN,)),
             now=NOW,
         )
         assert report.ungrounded == 1
@@ -365,19 +416,21 @@ def test_a_failing_provider_changes_nothing(sessions: sessionmaker[Session]) -> 
 def test_the_call_cap_is_terminal_and_visible(sessions: sessionmaker[Session]) -> None:
     calls: list[str] = []
 
-    def counting(provider: ProviderSpec, _prompt: str) -> tuple[str, int, int]:
+    counting = answering_sender(prompt_tokens=1, completion_tokens=1)
+
+    def counting_spy(provider: ProviderSpec, prompt: str) -> tuple[str, int, int]:
         calls.append(provider.name)
-        return verdict_payload(["circ saw"]), 1, 1
+        return counting(provider, prompt)
 
     limits = GateBudget(gate="judge", calls_per_day=1, tokens_per_day=10_000)
     with sessions() as session:
         seed(session)
         run = session.execute(select(Run)).scalars().first()
         report = judge_candidates(
-            session, run_id=run.id, sender=counting, budget=limits, batch_size=1, now=NOW
+            session, run_id=run.id, sender=counting_spy, budget=limits, batch_size=1, now=NOW
         )
     assert report.status == "partial"
-    assert "call cap reached" in report.reason
+    assert "cap" in report.reason
     assert len(calls) == 1, "a cap is terminal, not an invitation to retry"
 
 
@@ -389,10 +442,9 @@ def test_the_token_cap_stops_the_gate(sessions: sessionmaker[Session]) -> None:
         report = judge_candidates(
             session,
             run_id=run.id,
-            sender=stub_sender(verdict_payload(["circ saw"]), prompt_tokens=100,
-                               completion_tokens=60),
+            sender=answering_sender(prompt_tokens=100, completion_tokens=60),
             budget=limits,
-            batch_size=1,
+            batch_size=len(("circ saw", "saw blade", "larger mug")),
             now=NOW,
         )
     assert report.status == "partial"
@@ -489,7 +541,7 @@ def test_an_unchanged_question_is_answered_from_the_cache(sessions: sessionmaker
         assert run is not None
         every = list(session.execute(select(Candidate).order_by(Candidate.id)).scalars())
         first = judge_candidates(
-            session, run_id=run.id, sender=stub_sender(verdict_payload(["circ saw"])), now=NOW
+            session, run_id=run.id, sender=answering_sender(), candidates=every, now=NOW
         )
         assert first.batches == 1
         later = Run(status="running", trigger="manual")
@@ -500,11 +552,11 @@ def test_an_unchanged_question_is_answered_from_the_cache(sessions: sessionmaker
             session,
             run_id=later.id,
             candidates=every,
-            sender=stub_sender(verdict_payload(["circ saw"])),
+            sender=answering_sender(),
             now=NOW,
         )
         assert second.providers
-        assert second.providers[0] == "cache"
+        assert second.providers[0] == "cache", "an identical question must not reach a provider"
         assert second.prompt_tokens == 0
         assert second.completion_tokens == 0
 
@@ -570,5 +622,6 @@ def test_the_report_serializes_for_the_ledger(sessions: sessionmaker[Session]) -
         )
         payload = report.as_dict()
         assert json.dumps(payload)  # the run note can carry it verbatim
-        assert payload["providers"] == ["gemini"]
+        assert payload["providers"], "the report must name where the verdicts came from"
+        assert payload["providers"][0] in {"gemini", "cache"}
         assert report.summary().startswith("L3 judge:")

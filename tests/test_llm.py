@@ -235,9 +235,14 @@ def test_gateway_fails_over_in_chain_order(sessions: sessionmaker[Session]) -> N
     # A 429 is TRANSIENT, so each chain entry is retried before the chain moves on; and both
     # Gemini entries (the spec's, plus the second model the live drill proved necessary) come
     # before Groq. Order is the specification's.
-    assert tried == (
-        ["gemini"] * _TRANSIENT + ["gemini"] * _TRANSIENT + ["groq"] * _TRANSIENT + ["cerebras"]
-    )
+    # A 429 is transient, so every chain entry is retried before the chain moves on. The
+    # expectation is derived from the chain so adding a provider cannot leave this test lying.
+    expected: list[str] = []
+    for provider in default_chain():
+        expected.extend([provider.name] * (_TRANSIENT if provider.name != "cerebras" else 1))
+        if provider.name == "cerebras":
+            break
+    assert tried == expected
     assert any("429" in note for note in outcome.notes)
 
 
@@ -256,8 +261,9 @@ def test_schema_violation_retries_once_then_moves_on(sessions: sessionmaker[Sess
             evidence_urls=EVIDENCE, now=NOW,
         )
     assert outcome.provider == "groq"
-    # One schema retry per chain entry, and the chain has two Gemini entries before Groq.
-    assert calls == ["gemini", "gemini", "gemini", "gemini", "groq"]
+    # One schema retry per chain entry, over the chain's Gemini entries before Groq.
+    geminis = sum(1 for provider in default_chain() if provider.name == "gemini")
+    assert calls == ["gemini"] * (geminis * 2) + ["groq"]
     assert any("not JSON" in note for note in outcome.notes)
 
 
@@ -283,7 +289,7 @@ def test_a_permanent_provider_error_fails_over_immediately(
             evidence_urls=EVIDENCE, now=NOW,
         )
     assert outcome.provider == "ollama"  # answered by the last entry
-    assert tried == ["gemini", "gemini", "groq", "cerebras", "ollama"]  # one attempt each
+    assert tried == [provider.name for provider in default_chain()]  # one attempt each
 
 
 def test_every_provider_failing_is_a_recorded_skip_not_an_abort(
@@ -428,7 +434,7 @@ def test_default_chain_matches_the_specification() -> None:
     The distinct-provider order is still exactly Gemini -> Groq -> Cerebras -> Ollama.
     """
     names = [provider.name for provider in default_chain()]
-    assert names == ["gemini", "gemini", "groq", "cerebras", "ollama"]
+    assert names == ["gemini", "gemini", "gemini", "groq", "cerebras", "ollama"]
     seen: list[str] = []
     for name in names:
         if name not in seen:

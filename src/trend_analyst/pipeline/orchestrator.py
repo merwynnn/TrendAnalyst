@@ -43,7 +43,8 @@ from config.settings import ConfigError, default_config_dir, load_settings
 from trend_analyst.llm.gates import judge_candidates, pending_judgements
 from trend_analyst.llm.providers import settings_sender
 from trend_analyst.llm.replay import ReplayMissError, load_fixture, replay_sender
-from trend_analyst.llm.schemas import JudgeVerdict
+from trend_analyst.llm.schemas import JudgeVerdict, WriterBrief
+from trend_analyst.llm.writer import brief_markdown, stored_briefs, write_briefs
 from trend_analyst.logging import configure_logging, get_logger, log_event
 from trend_analyst.net import (
     EgressDeniedError,
@@ -53,6 +54,7 @@ from trend_analyst.net import (
     RecordedHttpClient,
     fixture_path,
 )
+from trend_analyst.pipeline.briefs import render_briefs_table
 from trend_analyst.pipeline.decide import read_ranked, run_decide
 from trend_analyst.pipeline.layers.l1 import DEFAULT_MIN_KEEP, DEFAULT_PRUNE_FRACTION
 from trend_analyst.pipeline.state import (
@@ -701,6 +703,23 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="ignore the LLM cache for this run (a replay must exercise the whole path)",
     )
+    # Writer gate (P4): one page per kept candidate, top-K only.
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="run the Writer gate over the kept candidates (needs a provider key)",
+    )
+    parser.add_argument(
+        "--write-replay",
+        default=None,
+        metavar="FIXTURE",
+        help="run the Writer gate offline against a recorded brief",
+    )
+    parser.add_argument("--top-k", type=int, default=5, help="how many candidates get a brief")
+    parser.add_argument(
+        "--briefs", action="store_true", help="print the stored briefs and exit"
+    )
+    parser.add_argument("--brief", default=None, metavar="PHRASE", help="print one brief and exit")
     return parser
 
 
@@ -709,7 +728,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Default depends on intent: a plain invocation collects, while --judge/--judge-replay should
     # not drag a full L0 run along with it (the first replay did, drowning the output).
     if args.layers is None:
-        args.layers = "L1,L3" if (args.judge or args.judge_replay) else "L0"
+        gate_run = bool(
+            args.judge or args.judge_replay or args.write or args.write_replay or args.briefs
+        )
+        args.layers = "L1,L3" if gate_run else "L0"
     requested = {layer.strip().upper() for layer in args.layers.split(",") if layer.strip()}
     unknown = requested - {"L0", "L1", "L3"}
     if unknown:
@@ -812,12 +834,20 @@ def _dispatch(
         else:
             print(decide.render(top=args.top))
 
-    # Judging comes after deciding: the gate judges what the decide layer just produced.
+    # Judging comes after deciding: the gate judges what the decide layer just produced. The
+    # writer runs last, over what the Judge kept. The dispatch also fires for --briefs/--brief,
+    # which are read-only and must not need a gate flag to reach their handler.
     if args.judge or args.judge_replay:
         judge_code, judge_payload = _run_judge_cli(args, settings, sessions, exit_code)
         exit_code = max(exit_code, judge_code)
         if judge_payload is not None:
             combined["judge"] = judge_payload
+
+    if args.write or args.write_replay or args.briefs or args.brief:
+        write_code, write_payload = _run_writer_cli(args, settings, sessions, exit_code)
+        exit_code = max(exit_code, write_code)
+        if write_payload is not None:
+            combined["writer"] = write_payload
 
     return exit_code, combined
 
@@ -903,6 +933,95 @@ def _run_judge_cli(
             )
     payload = {**report.as_dict(), "source": note}
     return (exit_code if report.ok else 1), payload
+
+
+def _print_briefs(
+    args: Any, sessions: sessionmaker[Session], exit_code: int
+) -> tuple[int, dict[str, Any] | None]:
+    """Print stored briefs (`--briefs`) or one brief (`--brief`). Read-only."""
+    with sessions() as session:
+        if args.brief:
+            body = brief_markdown(session, str(args.brief))
+            if body is None:
+                print(f"no brief for {args.brief!r}", file=sys.stderr)
+                return 1, None
+            print(body)
+            return exit_code, None
+        rows = stored_briefs(session, limit=max(args.top_k, 20))
+        print(render_briefs_table(rows, limit=args.top_k))
+        return exit_code, {"briefs": rows[: args.top_k]}
+
+
+def _run_writer_cli(
+    args: Any,
+    settings: Any,
+    sessions: sessionmaker[Session],
+    exit_code: int,
+) -> tuple[int, dict[str, Any] | None]:
+    """Run the Writer gate from the CLI: live, or replayed from a recorded brief."""
+
+    if args.briefs or args.brief:
+        return _print_briefs(args, sessions, exit_code)
+
+    replay_path = Path(args.write_replay) if args.write_replay else None
+    with sessions() as session:
+        if replay_path is not None:
+            try:
+                fixture = load_fixture(replay_path)
+            except ReplayMissError as exc:
+                print(f"replay unavailable: {exc}", file=sys.stderr)
+                return 1, None
+            recorded = WriterBrief.model_validate(fixture["output"])
+            named = session.execute(
+                select(Candidate).where(Candidate.phrase == recorded.phrase)
+            ).scalars().first()
+            if named is None:
+                print(
+                    f"recording names {recorded.phrase!r}, which is not a candidate here",
+                    file=sys.stderr,
+                )
+                return 1, None
+            sender = replay_sender(fixture, schema=WriterBrief)
+            queue = [named]
+            note = f"replayed {fixture['recorded_at']} (model {fixture['model']})"
+        else:
+            try:
+                sender = settings_sender(settings)
+            except Exception as exc:
+                print(f"writer unavailable: {exc}", file=sys.stderr)
+                return 1, None
+            queue = None
+            note = "live provider call"
+
+        handle = start_run(session, trigger="manual", resume=False)
+        session.commit()
+        report = write_briefs(
+            session,
+            run_id=handle.run_id,
+            sender=sender,
+            candidates=queue,
+            top_k=args.top_k,
+            dry_run=args.dry_run,
+            bypass_cache=getattr(args, "fresh", False),
+        )
+        if not args.dry_run:
+            finish_run(
+                session,
+                str(handle.run_id),
+                status="ok" if report.ok else "degraded",
+                layer_status={"L3-writer": report.as_dict()},
+                notes=f"{report.summary()} ({note})",
+            )
+            session.commit()
+
+    if not args.json:
+        print(f"writer run {handle.run_id} ({note})")
+        print(report.summary())
+        for entry in report.briefs:
+            cites = entry["citations"]
+            print(f"  {entry['phrase']:<28} mgs={entry['mgs']} ${entry['revenue_p50']:,.0f}/mo "
+                  f"citations={cites}{'' if entry['grounded'] else ' (UNGROUNDED)'}")
+    return (exit_code if report.ok else 1), {**report.as_dict(), "source": note}
 
 
 def _resolve_as_of(args: Any, sessions: sessionmaker[Session]) -> datetime:

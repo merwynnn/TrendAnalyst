@@ -376,8 +376,12 @@ def _apply_batch(
     payload: Mapping[str, Any],
     report: JudgeReport,
     dry_run: bool,
-) -> None:
-    """Apply one batch's verdicts to the candidates and to the report's counters."""
+) -> list[JudgedCandidate]:
+    """Apply one batch's verdicts. Returns the candidates the batch left unjudged.
+
+    Returning them is what makes coverage a fact rather than a hope: the caller re-asks about
+    exactly those candidates, and whatever is still missing at the end is reported by name.
+    """
     by_phrase = {item.phrase.lower(): (index, item) for index, item in enumerate(batch)}
     applied = 0
     for verdict in verdicts:
@@ -408,20 +412,19 @@ def _apply_batch(
             report.unchanged += 1
 
     answered = {verdict.phrase.lower() for verdict in verdicts}
-    report.missing_verdicts.extend(
-        item.phrase for item in batch if item.phrase.lower() not in answered
-    )
+    missing = [item for item in batch if item.phrase.lower() not in answered]
     report.per_batch.append(
         {
             "batch": report.batches,
             "status": outcome.status,
             "applied": applied,
-            "missing": len(batch) - applied,
+            "missing": len(missing),
             "provider": outcome.provider,
             "model": outcome.model,
             "tokens": outcome.prompt_tokens + outcome.completion_tokens,
         }
     )
+    return missing
 
 
 def judge_candidates(
@@ -440,20 +443,30 @@ def judge_candidates(
     gateway: Callable[..., GatewayOutcome] | None = None,
     limit: int = DEFAULT_BATCH_SIZE * 3,
     bypass_cache: bool = False,
+    max_rounds: int = 2,
 ) -> JudgeReport:
     """Judge the candidates a decide run produced, and apply the verdicts.
+
+    Coverage is a fact, not a hope. The first live run returned **one** verdict for a batch of four
+    candidates — the model answered about the most interesting one and stopped — so three candidates
+    stayed unjudged while the gate reported success. Whatever a round leaves unjudged is therefore
+    re-batched and asked about again, up to ``max_rounds`` times; what is *still* missing at the end
+    is reported by name.
 
     Args:
         sender: the provider transport (injected; tests pass a stub, production the real one).
         candidates: the batch to judge; defaults to the unjudged candidates for this run.
         calls_spent, tokens_spent: today's spend for the gate, read once by the caller so a night
             of batches shares one read instead of one per batch.
+        max_rounds: extra rounds for candidates a round did not cover. Bounded, because a model
+            that will not answer about a phrase will not start on round nine, and each round costs a
+            call against the day's cap.
         dry_run: assemble and call nothing, write nothing.
     """
     report = JudgeReport(run_id=str(run_id))
     limits = budget or DEFAULT_BUDGETS["judge"]
     providers = tuple(chain) if chain is not None else default_chain()
-    run_gate = gateway or _runner(sender, providers)
+    run_gate = gateway or call_gate
 
     queue = list(candidates) if candidates is not None else pending_judgements(
         session, limit=limit, run_id=run_id
@@ -463,75 +476,147 @@ def judge_candidates(
         report.reason = "no unjudged candidates for this run"
         return report
 
-    for start in range(0, len(queue), batch_size):
-        chunk = queue[start : start + batch_size]
+    remaining = list(queue)
+    for round_index in range(max_rounds + 1):
+        if not remaining:
+            break
         wall = _budget_wall(
             report, limits=limits, calls_spent=calls_spent, tokens_spent=tokens_spent
         )
         if wall:
             report.status = "partial"
             report.reason = wall
+            report.missing_verdicts.extend(str(item.phrase) for item in remaining)
             break
 
-        batch = build_batch(session, chunk)
-        payload = {"candidates": [item.as_dict() for item in batch]}
-        urls = tuple(url for item in batch for url in item.urls)
-        prompt = (
-            JUDGE_INSTRUCTIONS
-            + "\n\nCandidates (JSON):\n"
-            + json.dumps(payload, sort_keys=True, ensure_ascii=False)
-        )
+        missing: list[JudgedCandidate] = []
+        for start_index in range(0, len(remaining), batch_size):
+            chunk = remaining[start_index : start_index + batch_size]
+            batch = build_batch(session, chunk)
+            payload = {"candidates": [item.as_dict() for item in batch]}
+            urls = tuple(url for item in batch for url in item.urls)
+            prompt = JUDGE_INSTRUCTIONS + "\n\nCandidates (JSON):\n" + json.dumps(
+                payload, sort_keys=True, ensure_ascii=False
+            )
+            if round_index:
+                prompt = (
+                    JUDGE_INSTRUCTIONS
+                    + f"\n\nRE-ASK round {round_index}: the previous answer omitted these "
+                    "candidates. Answer about EVERY one of them.\n\nCandidates (JSON):\n"
+                    + json.dumps(payload, sort_keys=True, ensure_ascii=False)
+                )
 
-        outcome = run_gate(
-            session,
-            gate="judge",
-            prompt=prompt,
-            schema=JudgeBatch,
-            sender=sender,
-            chain=providers,
-            budget=limits,
-            payload=payload,
-            cached_calls_today=calls_spent + report.batches,
-            cached_tokens_today=tokens_spent + report.prompt_tokens + report.completion_tokens,
-            evidence_urls=urls,
-            run_id=run_id,
-            now=now,
-            dry_run=dry_run,
-            bypass_cache=bypass_cache,
-        )
-        report.batches += 1
-        report.prompt_tokens += outcome.prompt_tokens
-        report.completion_tokens += outcome.completion_tokens
-        report.removed_quotes += outcome.removed_quotes
-        if outcome.provider and outcome.provider not in report.providers:
-            report.providers.append(outcome.provider)
+            outcome = run_gate(
+                session,
+                gate="judge",
+                prompt=prompt,
+                schema=JudgeBatch,
+                sender=sender,
+                chain=providers,
+                budget=limits,
+                payload=payload,
+                cached_calls_today=calls_spent + report.batches,
+                cached_tokens_today=tokens_spent
+                + report.prompt_tokens
+                + report.completion_tokens,
+                evidence_urls=urls,
+                run_id=run_id,
+                now=now,
+                dry_run=dry_run,
+                bypass_cache=bypass_cache,
+            )
+            report.batches += 1
+            report.prompt_tokens += outcome.prompt_tokens
+            report.completion_tokens += outcome.completion_tokens
+            report.removed_quotes += outcome.removed_quotes
+            if outcome.provider and outcome.provider not in report.providers:
+                report.providers.append(outcome.provider)
 
-        if not outcome.ok:
-            # A degraded batch must not become a mass deletion: candidates keep their status and
-            # the reason travels with the report.
-            report.status = "degraded"
-            report.reason = outcome.reason or "gateway returned no verdicts"
-            report.per_batch.append({"batch": report.batches, "status": outcome.status,
-                                     "reason": outcome.reason[:200]})
-            break
+            if outcome.capped:
+                # A cap is the gateway choosing not to spend: the run is partial by design and the
+                # unjudged candidates are named. Reporting this as `degraded` conflated "we decided
+                # not to call" with "the provider failed", and a monitor agent acts differently on
+                # each. The gateway carries the flag, so this is not a string match on a reason.
+                report.status = "partial"
+                report.reason = outcome.reason or "the gate was capped before this batch"
+                report.per_batch.append(
+                    {
+                        "batch": report.batches,
+                        "status": "skipped",
+                        "reason": outcome.reason[:200],
+                    }
+                )
+                report.missing_verdicts.extend(str(item.phrase) for item in batch)
+                return report
 
-        _apply_batch(
-            session,
-            run_id=run_id,
-            batch=batch,
-            verdicts=outcome.value.verdicts if isinstance(outcome.value, JudgeBatch) else [],
-            outcome=outcome,
-            payload=payload,
-            report=report,
-            dry_run=dry_run,
-        )
-        if not dry_run:
-            session.flush()
+            if not outcome.ok:
+                # A degraded batch must not become a mass deletion: candidates keep their status
+                # and the reason travels with the report.
+                report.status = "degraded"
+                report.reason = outcome.reason or "gateway returned no verdicts"
+                report.per_batch.append(
+                    {
+                        "batch": report.batches,
+                        "status": outcome.status,
+                        "reason": outcome.reason[:200],
+                    }
+                )
+                report.missing_verdicts.extend(str(item.phrase) for item in batch)
+                return report
+
+            missing.extend(
+                _apply_batch(
+                    session,
+                    run_id=run_id,
+                    batch=batch,
+                    verdicts=outcome.value.verdicts
+                    if isinstance(outcome.value, JudgeBatch)
+                    else [],
+                    outcome=outcome,
+                    payload=payload,
+                    report=report,
+                    dry_run=dry_run,
+                )
+            )
+            if not dry_run:
+                session.flush()
+
+            # A call's cost is not knowable in advance, so the cap can be crossed by exactly one
+            # call. When that happens the run says so and stops: the first version reported `ok`
+            # while over budget, which is the kind of number that quietly grows into a bill.
+            spent_wall = _budget_wall(
+                report, limits=limits, calls_spent=calls_spent, tokens_spent=tokens_spent
+            )
+            if spent_wall:
+                report.status = "partial"
+                report.reason = spent_wall
+                report.missing_verdicts.extend(
+                    str(item.phrase)
+                    for item in remaining[start_index + len(chunk) :]
+                )
+                report.missing_verdicts.extend(item.phrase for item in missing)
+                return report
+
+        if round_index < max_rounds:
+            if not missing:
+                break  # every candidate in this round was answered
+            remaining = _rows_for(session, missing)
+            continue
+        report.missing_verdicts.extend(item.phrase for item in missing)
 
     if report.status == "ok" and report.judged == 0:
         report.status = "empty"
         report.reason = "the gate answered, but with no applicable verdicts"
     return report
+
+
+def _rows_for(session: Session, items: Sequence[JudgedCandidate]) -> list[Candidate]:
+    """The `Candidate` rows for the judged candidates — the next round asks about these again."""
+    ids = [item.candidate_id for item in items]
+    if not ids:
+        return []
+    statement = select(Candidate).where(Candidate.id.in_(ids)).order_by(Candidate.id)
+    return list(session.execute(statement).scalars().all())
 
 
 def _apply_verdict(

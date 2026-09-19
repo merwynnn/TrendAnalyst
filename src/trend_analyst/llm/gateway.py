@@ -58,6 +58,9 @@ __all__ = [
 #:   "gemini-2.5-flash" (advertised, refused)   -> HTTP 404 "no longer available to new users"
 #:   gemini-flash-latest 503 under load        -> "experiencing high demand" (retried, then
 #:                                                 the chain's second Gemini model answers)
+#:   a spent free-tier quota (429)             -> the whole chain degrades with a reason; the
+#:                                                 flash-lite entry exists because its rate limit
+#:                                                 is far higher than the full models
 #:   "llama3.3-70b" on Cerebras                 -> 404; that account serves only
 #:                                                 qwen-3.8-27b and gpt-oss-120b
 #: `gemini-flash-latest` with API version v1beta is what answers 200 for this key. Note that
@@ -73,6 +76,11 @@ DEFAULT_CHAIN: Final[tuple[tuple[str, str], ...]] = (
     # the spec's chain cannot fail over from, because the next link (Groq) has no key here and the
     # one after it (Cerebras) answers 402. The order still leads with the spec's first provider.
     ("gemini", "gemini-3.6-flash"),
+    # The high-rate-limit workhorse: "flash-lite" tiers allow far more requests per day than the
+    # full models, which matters because the free tier is the binding constraint on a nightly run
+    # (LESSONS §6.5: a day of drilling exhausted the quota). It sits after the stronger models so
+    # quality comes first and rate limits are what it rescues, not what it is chosen for.
+    ("gemini", "gemini-3.5-flash-lite"),
     ("groq", "llama-3.3-70b-versatile"),
     ("cerebras", "gpt-oss-120b"),
     ("ollama", "llama3.2"),
@@ -147,6 +155,9 @@ class GatewayOutcome:
     value: Any | None = None
     cached: bool = False
     attempts: int = 0
+    #: True when the reason is a cap (we chose not to spend), False when providers failed. A monitor
+    #: agent acts differently on each: a cap is a budget conversation, a failure is an incident.
+    capped: bool = False
     prompt_tokens: int = 0
     completion_tokens: int = 0
     removed_quotes: int = 0
@@ -166,6 +177,7 @@ class GatewayOutcome:
             "model": self.model,
             "cached": self.cached,
             "attempts": self.attempts,
+            "capped": self.capped,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "removed_quotes": self.removed_quotes,
@@ -229,6 +241,7 @@ def call_gate(
     if cached_calls_today >= limits.calls_per_day:
         return GatewayOutcome(
             status="skipped",
+            capped=True,
             gate=gate,
             reason=(
                 f"daily call cap reached ({cached_calls_today}/{limits.calls_per_day}); "
@@ -238,6 +251,7 @@ def call_gate(
     if cached_tokens_today >= limits.tokens_per_day:
         return GatewayOutcome(
             status="skipped",
+            capped=True,
             gate=gate,
             reason=(
                 f"daily token cap reached ({cached_tokens_today}/{limits.tokens_per_day}); "

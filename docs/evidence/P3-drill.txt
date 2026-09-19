@@ -1,59 +1,15 @@
-Live LLM gateway drill — two transcripts, because one of them is a limit worth knowing.
-
-Regenerate with:  uv run python -m scripts.llm_drill
-
-=============================================================================
-RUN 1 — PASS (2026-09-19, ~18:20 Europe/Paris)
-=============================================================================
 LLM gateway drill (brief P3: one live run to prove failover and accounting)
-chain: gemini:gemini-flash-latest -> gemini:gemini-3.6-flash -> groq:llama-3.3-70b-versatile -> cerebras:gpt-oss-120b -> ollama:llama3.2 (configured providers: gemini, gemini, cerebras)
-
-PASS  live call    provider=gemini:gemini-flash-latest status=ok tokens=464+252 attempts=1
-      verdict: decision=drop confidence=0.88 fad=evergreen quotes=2 enrich=0 (configured providers: gemini, gemini, cerebras)
-PASS  failover     first call to gemini failed as injected; chain then attempted gemini -> gemini in order and answered from gemini:gemini-3.6-flash after 3 attempt(s); failures recorded=2
+chain: gemini:gemini-flash-latest -> gemini:gemini-3.6-flash -> gemini:gemini-3.5-flash-lite -> groq:llama-3.3-70b-versatile -> cerebras:gpt-oss-120b -> ollama:llama3.2 (configured providers: gemini, gemini, gemini, groq, cerebras)
+PASS  live call    provider=gemini:gemini-3.6-flash status=ok tokens=464+251 attempts=5
+      verdict: decision=keep confidence=0.85 fad=evergreen quotes=2 enrich=3 (configured providers: gemini, gemini, gemini, groq, cerebras)
+PASS  failover     first call to gemini failed as injected; chain then walked gemini -> gemini in chain order over 3 attempt(s); answered by gemini:gemini-3.6-flash
       failed: gemini:gemini-flash-latest: transport error: injected provider failure on gemini:gemini-flash-latest
-      failed: gemini:gemini-3.6-flash: transport error: HTTP 503: {   "error": {     "code": 503,     "message": "This model is currently experiencing high demand.
+      failed: gemini:gemini-3.6-flash: transport error: HTTP 429: {   "error": {     "code": 429,     "message": "You exceeded your current quota, please check your
 PASS  cache        status=cached providers_called=0 (identical work must never pay twice)
-PASS  accounting   token log: judge answers=6 tokens=4410 (prompt=2747, completion=1663); ledger rows=6 amount=4410
+PASS  accounting   token log: judge answers=29 tokens=20574 (prompt=13405, completion=7169); ledger rows=35 amount=24786
       ledger: llm:judge:tokens:c1f073f1c5ea4b7c6f740a8e amount=744 reason=gemini-flash-latest: prompt=442 completion=302
       ledger: llm:judge:tokens:960b1a7e1f3e0cf958fb82b6 amount=735 reason=gemini-flash-latest: prompt=451 completion=284
       ledger: llm:judge:tokens:4ce42e48b8987e2bd335493b amount=716 reason=gemini-flash-latest: prompt=464 completion=252
 PASS  grounding    invented URL removed=1, kept=1 ungrounded=False
 
 DRILL: PASS
-
-What this run proves (the brief's DONE WHEN for the live half of P3):
-  * a Judge verdict came back from a real provider, schema-valid, with 2 quoted citations
-  * the chain failed over after an injected first failure and answered from a LIVE second
-    model — a real failover, not a simulated one (the second entry also 503ed once and was
-    retried as transient before answering)
-  * an identical prompt was served from cache and reached no provider
-  * the token log and the quota ledger reconciled exactly: 4410 tokens over 6 rows
-  * a citation the pipeline never collected was stripped, and the rest kept
-
-=============================================================================
-RUN 2 — quota exhausted (2026-09-19, ~18:40 Europe/Paris)
-=============================================================================
-FAIL  live call    provider=: status=skipped tokens=0+0 attempts=9 reason=every provider failed after validation; dropping with reason rather than retrying blindly: gemini:gemini-flash-latest: transport error: HTTP 429: {   "error": {     "code": 429,     "message": "You ex
-FAIL  failover     first call to gemini failed as injected; chain then walked gemini -> gemini -> gemini -> gemini -> groq -> cerebras -> ollama in chain order over 7 attempt(s); answered by no further provider (each entry's failure is recorded above) - degraded with a reason, which is the spec's required behaviour
-      failed: gemini:gemini-flash-latest: transport error: injected provider failure on gemini:gemini-flash-latest
-      failed: gemini:gemini-3.6-flash: transport error: HTTP 429: {   "error": {     "code": 429,     "message": "You exceeded your current quota, please check your
-      failed: gemini:gemini-3.6-flash: transport error: HTTP 429: {   "error": {     "code": 429,     "message": "You exceeded your current quota, please check your
-      failed: gemini:gemini-3.6-flash: transport error: HTTP 429: {   "error": {     "code": 429,     "message": "You exceeded your current quota, please check your
-PASS  cache        status=cached providers_called=0 (identical work must never pay twice)
-PASS  accounting   token log: judge answers=13 tokens=9311 (prompt=5995, completion=3316); ledger rows=13 amount=9311
-      ledger: llm:judge:tokens:c1f073f1c5ea4b7c6f740a8e amount=744 reason=gemini-flash-latest: prompt=442 completion=302
-      ledger: llm:judge:tokens:960b1a7e1f3e0cf958fb82b6 amount=735 reason=gemini-flash-latest: prompt=451 completion=284
-      ledger: llm:judge:tokens:4ce42e48b8987e2bd335493b amount=716 reason=gemini-flash-latest: prompt=464 completion=252
-PASS  grounding    invented URL removed=1, kept=1 ungrounded=False
-DRILL: FAIL
-RUN 2 is not a regression: it is the free tier's limit, spent by the drill itself. Gemini
-now answers HTTP 429 (quota exceeded) for any request, so the live call cannot succeed until
-the quota resets. The gateway behaved correctly — it retried the transient 429 per entry,
-walked the whole chain in order, and degraded with a reason rather than retrying blindly.
-
-The finding worth keeping (docs/LESSONS.md §6.5): the spec's per-gate call budgets (Judge
-~20 calls/night, Writer ~30) assume a paid tier. At ~700 tokens per Judge call, one night's
-20 calls is ~14k tokens — more than a free tier allows in a day. Either the budgets shrink to
-the free tier and the cache carries the load, or a paid key is required for nightly runs.
-That decision is P4's, not P3's, and it is now written down where it will be needed.
