@@ -129,7 +129,10 @@ def check_database(engine: Engine) -> DatabaseStatus:
                 text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
             ).scalar_one_or_none()
     except Exception as exc:  # any driver/connection failure is a status, not a crash
-        return DatabaseStatus(ok=False, detail=f"{type(exc).__name__}: {exc}")
+        # First line only: a health report is a list of facts, and SQLAlchemy's multi-line
+        # "(Background on this error at: ...)" trailer belongs in a log, not in the summary.
+        first_line = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+        return DatabaseStatus(ok=False, detail=f"{type(exc).__name__}: {first_line}")
 
     detail = None
     if pgvector is None:

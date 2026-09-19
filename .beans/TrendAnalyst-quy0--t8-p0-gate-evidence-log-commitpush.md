@@ -1,11 +1,11 @@
 ---
 # TrendAnalyst-quy0
 title: T8 — P0 gate + evidence log + commit/push
-status: todo
+status: in-progress
 type: task
 priority: high
 created_at: 2026-09-19T11:42:43Z
-updated_at: 2026-09-19T11:42:43Z
+updated_at: 2026-09-19T14:11:08Z
 parent: TrendAnalyst-l15l
 blocked_by:
     - TrendAnalyst-376u

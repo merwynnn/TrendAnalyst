@@ -85,13 +85,21 @@ echo "exit=$?"
 **Healthy output looks like** (P0, before any run exists):
 
 ```
-Trend Analyst health — status: HEALTHY (exit 0)
-database: ok (postgres 18.x, pgvector 0.8.1)
-runs: none yet (no nightly run has executed)
-sources: 15 tier-S enabled, 7 tier-A disabled — registry valid
-quota: 0 / 5000 tier-A calls spent
-gates: judge keep-rate n/a · eval baseline n/a
+Trend Analyst health — HEALTHY (exit 0)
+checked at 2026-09-19T14:09:02+00:00
+
+database: ok — postgres 18.6 (Ubuntu 18.6-0ubuntu0.26.04.1), pgvector 0.8.1
+registry: ok — 22 sources (15 Tier S, 7 Tier A) · 15 enabled, 7 disabled
+last run: none yet (no nightly run has executed)
+sources: 0 ok · 0 degraded · 0 down · 15 never_run · 7 disabled
+quota: 0 / 22400 requests today (0.0%), alert at 80%
+gates: judge keep-rate n/a — no Judge decisions recorded yet (the Judge gate lands in P3)
+evals: 0 case(s) — no golden cases yet (seeded from real output in P2, 50 by P5)
 ```
+
+`never_run` is the correct state before the first nightly run: the sources are configured
+and leashed, they simply have not fetched anything yet. Add `--verbose` to list every
+source, or `--json` for the machine-readable report the monitor agent parses.
 
 If any line reads `DOWN` or the exit code is not `0`, jump to §6.
 
