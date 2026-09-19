@@ -92,6 +92,7 @@ from trend_analyst.store.db import (
     create_db_engine,
     create_session_factory,
 )
+from trend_analyst.store.history import compare_versions, history, history_delta, render_history
 from trend_analyst.store.models import Candidate, RawItem, SignalRow
 from trend_analyst.store.sync import sync_sources
 
@@ -726,6 +727,22 @@ def _build_parser() -> argparse.ArgumentParser:
         "--briefs", action="store_true", help="print the stored briefs and exit"
     )
     parser.add_argument("--brief", default=None, metavar="PHRASE", help="print one brief and exit")
+    # Snapshot history views (P4): the append-only table read back.
+    parser.add_argument(
+        "--history", default=None, metavar="PHRASE", help="print a candidate's score history"
+    )
+    parser.add_argument(
+        "--history-delta",
+        default=None,
+        metavar="PHRASE",
+        help="print what moved between a candidate's first and newest snapshot",
+    )
+    parser.add_argument(
+        "--compare-versions",
+        default=None,
+        metavar="PHRASE",
+        help="compare a candidate's newest snapshot per weights version",
+    )
     return parser
 
 
@@ -849,7 +866,15 @@ def _dispatch(
         if judge_payload is not None:
             combined["judge"] = judge_payload
 
-    if args.write or args.write_replay or args.briefs or args.brief:
+    if (
+        args.write
+        or args.write_replay
+        or args.briefs
+        or args.brief
+        or args.history
+        or args.history_delta
+        or args.compare_versions
+    ):
         write_code, write_payload = _run_writer_cli(args, settings, sessions, exit_code)
         exit_code = max(exit_code, write_code)
         if write_payload is not None:
@@ -948,6 +973,55 @@ def _run_judge_cli(
     return (exit_code if report.ok else 1), payload
 
 
+def _print_history(
+    args: Any, sessions: sessionmaker[Session], exit_code: int
+) -> tuple[int, dict[str, Any] | None]:
+    """Print the snapshot history of one candidate: raw points, a delta, or a version comparison."""
+    phrase = str(args.history or args.history_delta or args.compare_versions)
+    with sessions() as session:
+        if args.compare_versions:
+            versions = [
+                "v1",
+                *sorted(
+                    {
+                        point.weights_version
+                        for point in history(session, phrase=phrase)
+                        if point.weights_version != "v1"
+                    }
+                ),
+            ]
+            comparison = compare_versions(session, phrase=phrase, versions=versions)
+            payload = {
+                version: (point.as_dict() if point is not None else None)
+                for version, point in comparison.items()
+            }
+            if not args.json:
+                for version, point in comparison.items():
+                    if point is None:
+                        print(f"{version}: never scored")
+                        continue
+                    print(f"{version}: MGS {point.mgs:.2f} fad {point.fad_label} "
+                          f"({point.scored_at[:19]})")
+            return exit_code, {"phrase": phrase, "versions": payload}
+
+        points = history(session, phrase=phrase)
+        if args.history_delta:
+            delta = history_delta(session, phrase=phrase)
+            if delta is None:
+                print(f"{phrase}: fewer than two snapshots, so there is no delta to show")
+                return exit_code, {"phrase": phrase, "delta": None}
+            if not args.json:
+                print(delta.render())
+            return exit_code, {"phrase": phrase, "delta": delta.as_dict()}
+
+        if not args.json:
+            print(render_history(points))
+        return exit_code, {
+            "phrase": phrase,
+            "points": [point.as_dict() for point in points],
+        }
+
+
 def _print_briefs(
     args: Any, sessions: sessionmaker[Session], exit_code: int
 ) -> tuple[int, dict[str, Any] | None]:
@@ -975,6 +1049,8 @@ def _run_writer_cli(
 
     if args.briefs or args.brief:
         return _print_briefs(args, sessions, exit_code)
+    if args.history or args.history_delta or args.compare_versions:
+        return _print_history(args, sessions, exit_code)
 
     replay_path = Path(args.write_replay) if args.write_replay else None
     with sessions() as session:

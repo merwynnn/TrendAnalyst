@@ -299,6 +299,29 @@ assert any("offline: replaying" in note for note in payload["notes"]), payload["
 PROBE
 }
 check "P4 nightly — all layers then a balanced ledger" p4_probe
+eval_probe() {
+# Spec 8's eval half: the seeded golden cases must still describe the system. Bands and labels are
+# checked always; keep/drop only where a Judge verdict exists, which the report makes visible rather
+# than hiding behind a pass.
+local out
+out=$(uv run python -m evals.run_evals --json 2>/dev/null)
+printf '%s' "$out" > "${TMPDIR:-/tmp}/ta_eval.json"
+uv run python - "${TMPDIR:-/tmp}/ta_eval.json" <<'PROBE' || return 1
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+checked = [r for r in payload["results"] if r["checks"]]
+print(f"cases: {payload['total']} · checked: {len(checked)} · passed: {payload['passed']} · "
+      f"failed: {payload['failed']} · skipped: {payload['skipped']}")
+for result in checked[:3]:
+    print(f"  {result['id'][:46]:<46} {result['checks']}")
+assert payload["total"] >= 10, "the golden case set must not shrink"
+assert checked, "at least one case must be checkable"
+assert payload["failed"] == 0, [r["reasons"] for r in payload["results"] if r["reasons"]]
+assert all(r["checks"].get("score_band", True) for r in checked), "score bands must hold"
+PROBE
+}
+check "evals — golden cases still describe the system" eval_probe
 # --- summary -----------------------------------------------------------------
 header "Summary"
 if [ "$failures" -eq 0 ]; then

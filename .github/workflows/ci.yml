@@ -1,0 +1,105 @@
+name: CI
+
+# Spec §8's checklist: tests, evals, determinism. The point of this workflow is not to be thorough —
+# it is to make the three claims the project repeatedly makes impossible to fake:
+#
+#   1. **no test touches the network.** Tests run with two sentinels in the environment and a
+#      conftest that refuses live traffic; the only HTTP in a test is a recorded fixture.
+#   2. **the determinism rule holds** (spec §5.4): replaying the same lake must reproduce the same
+#      scores. The step runs the pipeline twice and compares snapshot hashes.
+#   3. **the golden cases still describe the system.** They are frozen, so a behaviour change shows
+#      up as a failed case rather than as a surprise three phases later.
+#
+# Postgres runs as a service container with pgvector, which is the one dependency the suite cannot
+# fake. Credentials are ephemeral and local to the runner.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        # pgvector's image, because the migration creates a vector column when the extension is
+        # available and the tests assert that path.
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: ta
+          POSTGRES_PASSWORD: ta_ci_password
+          POSTGRES_DB: trend_analyst
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ta -d trend_analyst"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TA_ENV: dev
+      # Layer precedence: defaults < settings.yaml < settings.<env>.yaml < secrets < env. CI has no
+      # secrets file, so the environment layer carries the DSN — which is what that layer is for.
+      TA_DB__URL: postgresql+psycopg://ta:ta_ci_password@127.0.0.1:5432/trend_analyst
+      TA_TEST_DB_URL: postgresql+psycopg://ta:ta_ci_password@127.0.0.1:5432/trend_analyst_test
+      UV_PYTHON_DOWNLOADS: never
+      UV_NO_MANAGED_PYTHON: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Create the test database
+        env:
+          PGPASSWORD: ta_ci_password
+        run: |
+          psql -h 127.0.0.1 -U ta -d trend_analyst -c 'CREATE DATABASE trend_analyst_test'
+          psql -h 127.0.0.1 -U ta -d trend_analyst_test -c 'CREATE EXTENSION IF NOT EXISTS vector'
+
+      - name: Install dependencies
+        run: uv sync --locked --dev
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Types
+        run: uv run mypy src config
+
+      - name: Migrate
+        run: |
+          uv run alembic upgrade head
+          # Zero drift: the models and the migration must agree, or the next migration is a lie.
+          uv run alembic check
+
+      - name: Tests — no database, no network
+        run: uv run pytest -q -m "not db"
+
+      - name: Tests — full suite against Postgres
+        run: uv run pytest -q
+
+      - name: Determinism — the same lake must produce the same scores
+        run: |
+          first=$(uv run python -m trend_analyst.pipeline.orchestrator --layers L1,L3 --json | jq -r .decide.snapshot_hash)
+          second=$(uv run python -m trend_analyst.pipeline.orchestrator --layers L1,L3 --json | jq -r .decide.snapshot_hash)
+          echo "run 1: $first"
+          echo "run 2: $second"
+          test -n "$first"
+          test "$first" = "$second"
+
+      - name: Judge gate — offline replay of a recorded provider answer
+        run: uv run python -m trend_analyst.pipeline.orchestrator --judge-replay tests/data/llm/judge_verdict.json --fresh
+
+      - name: Nightly run — every layer, then a balanced ledger
+        run: uv run python -m scripts.nightly --offline --dry-run
+
+      - name: Golden eval cases
+        run: uv run python -m evals.run_evals

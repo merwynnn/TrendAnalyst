@@ -111,6 +111,21 @@ def request_url(url: str, params: Mapping[str, str] | None = None) -> str:
     return f"{url}{separator}{urlencode(sorted(params.items()))}"
 
 
+
+def request_key(method: str, target: str) -> str:
+    """The key a recorded request is stored under.
+
+    GET keeps the bare URL so every fixture recorded before this change still resolves; any other
+    method is prefixed, so a recorded POST cannot collide with a GET of the same URL.
+
+    >>> request_key("GET", "https://example.com/x")
+    'https://example.com/x'
+    >>> request_key("POST", "https://example.com/x")
+    'POST https://example.com/x'
+    """
+    return target if method.upper() == "GET" else f"{method.upper()} {target}"
+
+
 def check_egress(source_id: str, allowed_domains: tuple[str, ...], url: str) -> str:
     """Return the host of `url`, or raise if the source may not call it.
 

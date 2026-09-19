@@ -50,6 +50,7 @@ __all__ = [
     "FixedClock",
     "HttpClient",
     "HttpResponse",
+    "MissingCredentialError",
     "PluginContractError",
     "QuotaSnapshot",
     "RawBatch",
@@ -94,6 +95,15 @@ class SourceSkippedError(RuntimeError):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+class MissingCredentialError(SourceSkippedError):
+    """The plugin has no credential, so it declines to call.
+
+    A subclass of `SourceSkippedError` on purpose: "we cannot call this" and "the call failed" are
+    different outcomes, and the difference decides whether a monitor agent is looking at a gap in
+    tonight's evidence or at an incident.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +194,22 @@ class HttpClient(Protocol):
         headers: Mapping[str, str] | None = None,
     ) -> HttpResponse:
         """GET `url`. Raises on transport failure; returns the response otherwise."""
+
+    def post(
+        self,
+        url: str,
+        *,
+        params: Mapping[str, str] | None = None,
+        headers: Mapping[str, str] | None = None,
+        content: str | None = None,
+    ) -> HttpResponse:
+        """POST `url` with an optional form body.
+
+        Needed for OAuth token endpoints (eBay Browse, and any Tier-A API using client credentials).
+        A GET-only client would push a plugin into faking the dance, and a fixture would then pin
+        the
+        fiction.
+        """
 
 
 # ---------------------------------------------------------------------------

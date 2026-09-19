@@ -38,6 +38,7 @@ from trend_analyst.llm.writer import stored_briefs, write_briefs
 from trend_analyst.monitor.reconcile import accounted_totals, reconcile
 from trend_analyst.net import fixture_path
 from trend_analyst.pipeline.decide import run_decide
+from trend_analyst.pipeline.layers.l2 import L2Report
 from trend_analyst.pipeline.orchestrator import (
     _client_factory,
     _clock_factory,
@@ -72,6 +73,9 @@ class NightlyReport:
     l0_items_new: int = 0
     decide_status: str = ""
     candidates_scored: int = 0
+    l2_status: str = "skipped"
+    l2_enriched: int = 0
+    l2_spend: int = 0
     judge_status: str = ""
     judged: int = 0
     writer_status: str = ""
@@ -92,6 +96,11 @@ class NightlyReport:
             "dry_run": self.dry_run,
             "l0": {"status": self.l0_status, "items_new": self.l0_items_new},
             "decide": {"status": self.decide_status, "scored": self.candidates_scored},
+            "l2": {
+                "status": self.l2_status,
+                "enriched": self.l2_enriched,
+                "spend": self.l2_spend,
+            },
             "judge": {"status": self.judge_status, "judged": self.judged},
             "writer": {"status": self.writer_status, "briefs": self.briefs_written},
             "ttl": self.ttl_summary,
@@ -106,6 +115,8 @@ class NightlyReport:
             f"{' (dry run)' if self.dry_run else ''}",
             f"  L0 collect   {self.l0_status:<8} new signals: {self.l0_items_new}",
             f"  L1/L3 decide {self.decide_status:<8} candidates scored: {self.candidates_scored}",
+            f"  L2 enrich    {self.l2_status:<8} candidates: {self.l2_enriched} "
+            f"(spend {self.l2_spend})",
             f"  L3 judge     {self.judge_status:<8} judged: {self.judged}",
             f"  L3 writer    {self.writer_status:<8} briefs: {self.briefs_written}",
             f"  TTL          {self.ttl_summary}",
@@ -188,6 +199,10 @@ def run_nightly(
     report.decide_status = decide.status
     report.candidates_scored = decide.scoring.scored
 
+    # --- L2: enrich the top-K the Judge kept (only with a Tier-A credential) -----------------
+    _record_l2(report, _run_l2(session_factory=sessions, offline=offline, dry_run=dry_run,
+                               top_k=top_k))
+
     # --- L3: judge, then write ----------------------------------------------
     with sessions() as session:
         queue = list(pending_judgements(session, limit=judge_batch_size * 2))
@@ -250,6 +265,29 @@ def run_nightly(
         }
         report.totals = accounted_totals(session)
     return report
+
+
+def _record_l2(report: NightlyReport, l2: L2Report) -> None:
+    """Copy an L2 outcome into the nightly report, noting it when it was not a full run."""
+    report.l2_status = l2.status
+    report.l2_enriched = l2.enriched
+    report.l2_spend = l2.quota_spent
+    if l2.status not in {"ok", "empty"}:
+        report.notes.append(l2.reason or l2.summary())
+
+
+def _run_l2(
+    *, session_factory: Any, offline: bool, dry_run: bool, top_k: int
+) -> Any:
+    """Run L2 enrichment when a Tier-A source is both registered and credentialed.
+
+    Offline runs skip it entirely: a Tier-A source needs a network and a credential, and neither
+    exists in a replay. Saying so is the point — an "empty" L2 that silently did nothing would read
+    as "no candidate needed enrichment".
+    """
+    if offline:
+        return L2Report(status="skipped", reason="offline run: Tier-A sources need a network")
+    return L2Report(status="skipped", reason="no Tier-A plugin wired into the nightly driver yet")
 
 
 def _offline_sources(fixtures_dir: Path, registry: Any) -> list[str]:
