@@ -1,11 +1,11 @@
 ---
 # TrendAnalyst-xpnf
 title: T5 — Postgres models + migration 0001 + append-only guards
-status: todo
+status: in-progress
 type: task
 priority: high
 created_at: 2026-09-19T11:42:42Z
-updated_at: 2026-09-19T11:42:43Z
+updated_at: 2026-09-19T12:38:02Z
 parent: TrendAnalyst-l15l
 blocked_by:
     - TrendAnalyst-376u
