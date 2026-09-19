@@ -23,7 +23,7 @@ exactly like the Judge's.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -280,66 +280,37 @@ def write_briefs(
             report.status = "partial"
             report.reason = wall
             break
-        spent = tokens_spent + report.prompt_tokens + report.completion_tokens
 
         payload, allowed_urls = _payload_for(session, candidate)
-        prompt = (
-            WRITER_INSTRUCTIONS
-            + "\n\nCandidate (JSON):\n"
-            + json.dumps(payload, sort_keys=True, ensure_ascii=False)
-        )
-        outcome = run_gate(
+        step = _write_one(
             session,
-            gate="writer",
-            prompt=prompt,
-            schema=WriterBrief,
-            sender=sender,
-            chain=providers,
-            budget=limits,
-            payload=payload,
-            cached_calls_today=calls_spent + report.written,
-            cached_tokens_today=spent,
-            evidence_urls=allowed_urls,
             run_id=run_id,
+            candidate=candidate,
+            payload=payload,
+            allowed_urls=allowed_urls,
+            limits=limits,
+            calls_spent=calls_spent,
+            tokens_spent=tokens_spent,
+            report=report,
+            run_gate=run_gate,
+            sender=sender,
+            providers=providers,
+            stamp=stamp,
             now=now,
             dry_run=dry_run,
             bypass_cache=bypass_cache,
         )
-        report.prompt_tokens += outcome.prompt_tokens
-        report.completion_tokens += outcome.completion_tokens
-        report.removed_quotes += outcome.removed_quotes
-        if outcome.provider and outcome.provider not in report.providers:
-            report.providers.append(outcome.provider)
-
-        if not outcome.ok:
-            # Same rule as the Judge: a degraded gate changes nothing. A missing brief is a gap in
-            # the report; a half-written one is a lie in the archive.
-            report.status = "degraded"
-            report.reason = outcome.reason or "gateway returned no brief"
+        if step.stop:
+            report.status = step.status
+            report.reason = step.reason
             break
-
-        handled, skipped, entry, failure = _finish_one(
-            session,
-            run_id=run_id,
-            candidate=candidate,
-            outcome=outcome,
-            stamp=stamp,
-            dry_run=dry_run,
-        )
-        if failure:
-            report.status = "degraded"
-            report.reason = failure
-            break
-        if skipped:
+        if step.skipped:
             report.skipped_existing += 1
-        elif handled:
+        elif step.written:
             report.written += 1
-        if entry is not None:
-            report.briefs.append(entry)
-            if not entry["grounded"]:
-                # Counted from the rendered page's own state: the extraction of `_finish_one`
-                # dropped this counter once already, and a report that does not count its
-                # ungrounded briefs is a report that hides them.
+        if step.entry is not None:
+            report.briefs.append(step.entry)
+            if not step.entry["grounded"]:
                 report.ungrounded += 1
 
         if not dry_run:
@@ -359,6 +330,92 @@ def write_briefs(
         report.status = "empty"
         report.reason = report.reason or "no brief was written"
     return report
+
+
+@dataclass(slots=True)
+class _WriteStep:
+    """What one candidate's brief did."""
+
+    written: bool = False
+    skipped: bool = False
+    stop: bool = False
+    status: str = "ok"
+    reason: str = ""
+    entry: dict[str, Any] | None = None
+
+
+def _write_one(
+    session: Session,
+    *,
+    run_id: Any,
+    candidate: Candidate,
+    payload: Mapping[str, Any],
+    allowed_urls: Sequence[str],
+    limits: GateBudget,
+    calls_spent: int,
+    tokens_spent: int,
+    report: WriterReport,
+    run_gate: Any,
+    sender: Sender,
+    providers: Sequence[ProviderSpec],
+    stamp: datetime,
+    now: datetime | None,
+    dry_run: bool,
+    bypass_cache: bool,
+) -> _WriteStep:
+    """Ask the Writer about one candidate and store the page.
+
+    Extracted so `write_briefs` reads as "walk the queue under budget" and this reads as "what one
+    call means".
+    """
+    prompt = (
+        WRITER_INSTRUCTIONS
+        + "\n\nCandidate (JSON):\n"
+        + json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    )
+    outcome = run_gate(
+        session,
+        gate="writer",
+        prompt=prompt,
+        schema=WriterBrief,
+        sender=sender,
+        chain=providers,
+        budget=limits,
+        payload=payload,
+        cached_calls_today=calls_spent + report.written,
+        cached_tokens_today=tokens_spent + report.prompt_tokens + report.completion_tokens,
+        evidence_urls=tuple(allowed_urls),
+        run_id=run_id,
+        now=now,
+        dry_run=dry_run,
+        bypass_cache=bypass_cache,
+    )
+    report.prompt_tokens += outcome.prompt_tokens
+    report.completion_tokens += outcome.completion_tokens
+    report.removed_quotes += outcome.removed_quotes
+    if outcome.provider and outcome.provider not in report.providers:
+        report.providers.append(outcome.provider)
+
+    if outcome.capped:
+        return _WriteStep(stop=True, status="partial",
+                          reason=outcome.reason or "the gate was capped before this brief")
+    if not outcome.ok:
+        # Same rule as the Judge: a degraded gate changes nothing. A missing brief is a gap in the
+        # report; a half-written one is a lie in the archive.
+        return _WriteStep(stop=True, status="degraded",
+                          reason=outcome.reason or "gateway returned no brief")
+
+    handled, skipped, entry, failure = _finish_one(
+        session,
+        run_id=run_id,
+        candidate=candidate,
+        outcome=outcome,
+        stamp=stamp,
+        dry_run=dry_run,
+    )
+    if failure:
+        return _WriteStep(stop=True, status="degraded", reason=failure)
+    return _WriteStep(written=handled, skipped=skipped, entry=entry)
 
 
 def _finish_one(

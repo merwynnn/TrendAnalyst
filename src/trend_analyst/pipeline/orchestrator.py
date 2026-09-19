@@ -43,7 +43,7 @@ from config.settings import ConfigError, default_config_dir, load_settings
 from trend_analyst.llm.gates import judge_candidates, pending_judgements
 from trend_analyst.llm.providers import settings_sender
 from trend_analyst.llm.replay import ReplayMissError, load_fixture, replay_sender
-from trend_analyst.llm.schemas import JudgeVerdict, WriterBrief
+from trend_analyst.llm.schemas import JudgeBatch, JudgeVerdict, WriterBrief
 from trend_analyst.llm.writer import brief_markdown, stored_briefs, write_briefs
 from trend_analyst.logging import configure_logging, get_logger, log_event
 from trend_analyst.net import (
@@ -885,8 +885,12 @@ def _run_judge_cli(
                     file=sys.stderr,
                 )
                 return 1, None
+            # The gate asked its provider for a JudgeBatch, so the replay must answer with one:
+            # a bare verdict object fails validation and reads as a provider outage.
             sender = replay_sender(
-                fixture, covered=[str(candidate.phrase) for candidate in queue]
+                fixture,
+                schema=JudgeBatch,
+                covered=[str(candidate.phrase) for candidate in queue],
             )
             note = f"replayed {fixture['recorded_at']}"
         else:
@@ -927,9 +931,12 @@ def _run_judge_cli(
         print(f"judge run {handle.run_id} ({note})")
         print(report.summary())
         for entry in report.per_batch:
+            # Counters are absent on entries that never reached a verdict (a cap, a degradation),
+            # so they are read with defaults rather than assumed.
             print(
-                f"  batch {entry['batch']}: {entry['status']} applied={entry['applied']} "
-                f"missing={entry['missing']} provider={entry['provider']}"
+                f"  batch {entry.get('batch')}: {entry.get('status')} "
+                f"applied={entry.get('applied', 0)} missing={entry.get('missing', 0)} "
+                f"provider={entry.get('provider', '-')}"
             )
     payload = {**report.as_dict(), "source": note}
     return (exit_code if report.ok else 1), payload

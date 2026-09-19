@@ -79,7 +79,15 @@ def replay_sender(
     """
     recorded = fixture["output"]
     chosen = schema or schema_for_fixture(fixture)
-    value = chosen.model_validate(recorded)
+    if chosen is JudgeBatch:
+        # A single recorded verdict still has to arrive as a BATCH, because that is what the Judge
+        # gate asked its provider for. Returning the bare object made every model "fail validation"
+        # (JudgeBatch forbids extra inputs), so the replay reported a provider outage.
+        value: BaseModel = JudgeBatch.model_validate(
+            recorded if _BATCH_KEY in recorded else {_BATCH_KEY: [recorded]}
+        )
+    else:
+        value = chosen.model_validate(recorded)
     phrase = _recorded_phrase(value)
     needle = f'"{phrase}"'
     expected = {item.lower() for item in covered}

@@ -427,6 +427,119 @@ def _apply_batch(
     return missing
 
 
+@dataclass(slots=True)
+class _BatchStep:
+    """What one batch did: what it left unjudged, and whether the run should stop."""
+
+    missing: list[JudgedCandidate] = field(default_factory=list)
+    stop: bool = False
+    status: str = "ok"
+    reason: str = ""
+    continue_remaining: bool = True
+
+
+def _judge_one_batch(
+    session: Session,
+    *,
+    run_id: Any,
+    chunk: Sequence[Candidate],
+    round_index: int,
+    report: JudgeReport,
+    limits: GateBudget,
+    calls_spent: int,
+    tokens_spent: int,
+    run_gate: Callable[..., GatewayOutcome],
+    sender: Sender,
+    providers: Sequence[ProviderSpec],
+    now: datetime | None,
+    dry_run: bool,
+    bypass_cache: bool,
+) -> _BatchStep:
+    """Ask the gate about one batch and apply what comes back.
+
+    Extracted from the loop so the loop reads as "rounds over what is still unjudged" and this reads
+    as "what one call means" — the two concerns that the first version tangled together.
+    """
+    batch = build_batch(session, chunk)
+    payload = {"candidates": [item.as_dict() for item in batch]}
+    urls = tuple(url for item in batch for url in item.urls)
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    prompt = JUDGE_INSTRUCTIONS + "\n\nCandidates (JSON):\n" + encoded
+    if round_index:
+        prompt = (
+            JUDGE_INSTRUCTIONS
+            + f"\n\nRE-ASK round {round_index}: the previous answer omitted these candidates. "
+            "Answer about EVERY one of them.\n\nCandidates (JSON):\n"
+            + encoded
+        )
+
+    outcome = run_gate(
+        session,
+        gate="judge",
+        prompt=prompt,
+        schema=JudgeBatch,
+        sender=sender,
+        chain=providers,
+        budget=limits,
+        payload=payload,
+        cached_calls_today=calls_spent + report.batches,
+        cached_tokens_today=tokens_spent + report.prompt_tokens + report.completion_tokens,
+        evidence_urls=urls,
+        run_id=run_id,
+        now=now,
+        dry_run=dry_run,
+        bypass_cache=bypass_cache,
+    )
+    report.batches += 1
+    report.prompt_tokens += outcome.prompt_tokens
+    report.completion_tokens += outcome.completion_tokens
+    report.removed_quotes += outcome.removed_quotes
+    if outcome.provider and outcome.provider not in report.providers:
+        report.providers.append(outcome.provider)
+
+    if outcome.capped:
+        # A cap is the gateway choosing not to spend: partial by design, with the unjudged
+        # candidates named. Reporting it as `degraded` conflated "we decided not to call" with "the
+        # provider failed", and a monitor agent acts differently on each.
+        report.per_batch.append(
+            {"batch": report.batches, "status": "skipped", "reason": outcome.reason[:200]}
+        )
+        return _BatchStep(stop=True, status="partial",
+                          reason=outcome.reason or "the gate was capped before this batch")
+
+    if not outcome.ok:
+        # A degraded batch must not become a mass deletion: candidates keep their status.
+        report.per_batch.append(
+            {
+                "batch": report.batches,
+                "status": outcome.status,
+                "reason": outcome.reason[:200],
+            }
+        )
+        return _BatchStep(stop=True, status="degraded",
+                          reason=outcome.reason or "gateway returned no verdicts")
+
+    missing = _apply_batch(
+        session,
+        run_id=run_id,
+        batch=batch,
+        verdicts=outcome.value.verdicts if isinstance(outcome.value, JudgeBatch) else [],
+        outcome=outcome,
+        payload=payload,
+        report=report,
+        dry_run=dry_run,
+    )
+    if not dry_run:
+        session.flush()
+
+    # A call's cost is unknowable in advance, so the cap can be crossed by exactly one call. When
+    # that happens the run says so instead of reporting `ok` while over budget.
+    spent_wall = _budget_wall(
+        report, limits=limits, calls_spent=calls_spent, tokens_spent=tokens_spent
+    )
+    return _BatchStep(missing=missing, reason=spent_wall, continue_remaining=not spent_wall)
+
+
 def judge_candidates(
     session: Session,
     *,
@@ -492,107 +605,36 @@ def judge_candidates(
         missing: list[JudgedCandidate] = []
         for start_index in range(0, len(remaining), batch_size):
             chunk = remaining[start_index : start_index + batch_size]
-            batch = build_batch(session, chunk)
-            payload = {"candidates": [item.as_dict() for item in batch]}
-            urls = tuple(url for item in batch for url in item.urls)
-            prompt = JUDGE_INSTRUCTIONS + "\n\nCandidates (JSON):\n" + json.dumps(
-                payload, sort_keys=True, ensure_ascii=False
-            )
-            if round_index:
-                prompt = (
-                    JUDGE_INSTRUCTIONS
-                    + f"\n\nRE-ASK round {round_index}: the previous answer omitted these "
-                    "candidates. Answer about EVERY one of them.\n\nCandidates (JSON):\n"
-                    + json.dumps(payload, sort_keys=True, ensure_ascii=False)
-                )
-
-            outcome = run_gate(
+            step = _judge_one_batch(
                 session,
-                gate="judge",
-                prompt=prompt,
-                schema=JudgeBatch,
-                sender=sender,
-                chain=providers,
-                budget=limits,
-                payload=payload,
-                cached_calls_today=calls_spent + report.batches,
-                cached_tokens_today=tokens_spent
-                + report.prompt_tokens
-                + report.completion_tokens,
-                evidence_urls=urls,
                 run_id=run_id,
+                chunk=chunk,
+                round_index=round_index,
+                report=report,
+                limits=limits,
+                calls_spent=calls_spent,
+                tokens_spent=tokens_spent,
+                run_gate=run_gate,
+                sender=sender,
+                providers=providers,
                 now=now,
                 dry_run=dry_run,
                 bypass_cache=bypass_cache,
             )
-            report.batches += 1
-            report.prompt_tokens += outcome.prompt_tokens
-            report.completion_tokens += outcome.completion_tokens
-            report.removed_quotes += outcome.removed_quotes
-            if outcome.provider and outcome.provider not in report.providers:
-                report.providers.append(outcome.provider)
-
-            if outcome.capped:
-                # A cap is the gateway choosing not to spend: the run is partial by design and the
-                # unjudged candidates are named. Reporting this as `degraded` conflated "we decided
-                # not to call" with "the provider failed", and a monitor agent acts differently on
-                # each. The gateway carries the flag, so this is not a string match on a reason.
-                report.status = "partial"
-                report.reason = outcome.reason or "the gate was capped before this batch"
-                report.per_batch.append(
-                    {
-                        "batch": report.batches,
-                        "status": "skipped",
-                        "reason": outcome.reason[:200],
-                    }
-                )
-                report.missing_verdicts.extend(str(item.phrase) for item in batch)
+            if step.stop:
+                report.status = step.status
+                report.reason = step.reason
+                report.missing_verdicts.extend(str(item.phrase) for item in chunk)
+                report.missing_verdicts.extend(item.phrase for item in missing)
                 return report
-
-            if not outcome.ok:
-                # A degraded batch must not become a mass deletion: candidates keep their status
-                # and the reason travels with the report.
-                report.status = "degraded"
-                report.reason = outcome.reason or "gateway returned no verdicts"
-                report.per_batch.append(
-                    {
-                        "batch": report.batches,
-                        "status": outcome.status,
-                        "reason": outcome.reason[:200],
-                    }
-                )
-                report.missing_verdicts.extend(str(item.phrase) for item in batch)
-                return report
-
-            missing.extend(
-                _apply_batch(
-                    session,
-                    run_id=run_id,
-                    batch=batch,
-                    verdicts=outcome.value.verdicts
-                    if isinstance(outcome.value, JudgeBatch)
-                    else [],
-                    outcome=outcome,
-                    payload=payload,
-                    report=report,
-                    dry_run=dry_run,
-                )
-            )
-            if not dry_run:
-                session.flush()
-
-            # A call's cost is not knowable in advance, so the cap can be crossed by exactly one
-            # call. When that happens the run says so and stops: the first version reported `ok`
-            # while over budget, which is the kind of number that quietly grows into a bill.
-            spent_wall = _budget_wall(
-                report, limits=limits, calls_spent=calls_spent, tokens_spent=tokens_spent
-            )
-            if spent_wall:
+            missing.extend(step.missing)
+            if not step.continue_remaining:
+                # The cap was crossed by this call: stop here and report it rather than start
+                # another batch that would cross it further.
                 report.status = "partial"
-                report.reason = spent_wall
+                report.reason = step.reason or "the daily cap was reached by this call"
                 report.missing_verdicts.extend(
-                    str(item.phrase)
-                    for item in remaining[start_index + len(chunk) :]
+                    str(item.phrase) for item in remaining[start_index + len(chunk) :]
                 )
                 report.missing_verdicts.extend(item.phrase for item in missing)
                 return report

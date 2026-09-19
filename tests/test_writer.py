@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from trend_analyst.llm.gates import judge_candidates
 from trend_analyst.llm.gateway import GateBudget, ProviderSpec
+from trend_analyst.llm.schemas import JudgeBatch, JudgeVerdict, WriterBrief
 from trend_analyst.llm.writer import (
     DEFAULT_TOP_K,
     brief_markdown,
@@ -54,7 +55,9 @@ def sessions(db_engine: Engine) -> Iterator[sessionmaker[Session]]:
         connection.close()
 
 
-def seed(session: Session, phrases: Sequence[str] = PHRASES, *, status: str = "kept") -> list[int]:
+def seed(
+    session: Session, phrases: Sequence[str] = PHRASES, *, status: str = "kept"
+) -> list[int]:
     """Candidates with scores and evidence — the state a decided night leaves behind."""
     run = Run(status="running", trigger="manual")
     session.add(run)
@@ -102,7 +105,9 @@ def seed(session: Session, phrases: Sequence[str] = PHRASES, *, status: str = "k
 def brief_payload(phrase: str, *, url: str = URL_A, quotes: int = 2) -> dict:
     return {
         "phrase": phrase,
-        "verdict": f"{phrase} is a real gap: buyers complain about the guard and the price band fits.",
+        "verdict": (
+            f"{phrase} is a real gap: buyers complain about the guard and the price band fits."
+        ),
         "players": ["Incumbent A", "Incumbent B"],
         "risks": ["seasonality", "shipping"],
         "angles": ["a better guard", "a bundle"],
@@ -186,7 +191,8 @@ def test_write_briefs_stores_a_page_and_marks_the_candidate(
         assert report.ungrounded == 0
         rows = session.execute(select(Brief).order_by(Brief.id)).scalars().all()
         assert len(rows) == 2
-        assert rows[0].citations and rows[0].citations[0]["url"] == URL_A
+        assert rows[0].citations
+        assert rows[0].citations[0]["url"] == URL_A
         assert "circ saw" in rows[0].body_md
         assert rows[0].prompt_tokens == 200
         statuses = {
@@ -212,9 +218,11 @@ def test_the_rendered_page_carries_its_numbers(sessions: sessionmaker[Session]) 
         body = brief_markdown(session, "circ saw")
         assert body is not None
         assert "# circ saw" in body
-        assert "MGS" in body and "60.0" in body
+        assert "MGS" in body
+        assert "60.0" in body
         assert "$25 - $180 - $1,000" in body
-        assert "Weights" in body and "v1" in body
+        assert "Weights" in body
+        assert "v1" in body
         assert "## Citations" in body
         assert URL_A in body
         assert "written by gemini" in body
@@ -361,11 +369,9 @@ def test_no_kept_candidate_is_an_empty_run_not_an_error(
 
 
 # ---------------------------------------------------------------------------
-# renderer (pure)
+# The renderer is pure code: no database, no model
 # ---------------------------------------------------------------------------
 def test_render_brief_is_deterministic_and_marks_missing_citations() -> None:
-    from trend_analyst.llm.schemas import WriterBrief
-
     brief = WriterBrief.model_validate(brief_payload("circ saw", quotes=0))
     first = render_brief(brief, category="tools_diy", mgs=60.0, model="gemini:test", as_of=NOW)
     second = render_brief(brief, category="tools_diy", mgs=60.0, model="gemini:test", as_of=NOW)
@@ -375,7 +381,7 @@ def test_render_brief_is_deterministic_and_marks_missing_citations() -> None:
     assert first.sections == ("players", "risks", "angles")
 
 
-def test_render_briefs_table_handles_nothing(sessions: None = None) -> None:
+def test_render_briefs_table_handles_nothing() -> None:
     assert "no briefs yet" in render_briefs_table([])
     table = render_briefs_table(
         [{"phrase": "circ saw", "model": "gemini:x", "citations": 2, "revenue_p50": 180.0}]
@@ -411,12 +417,11 @@ def test_stored_briefs_returns_the_newest_per_candidate(
         rows = stored_briefs(session)
         assert len(rows) == 1  # one page per candidate, the newest
         assert rows[0]["phrase"] == "circ saw"
-        assert rows[0]["grounded" if "grounded" in rows[0] else "citations"] == 2
+        assert rows[0]["citations"] == 2
 
 
 def test_the_judge_and_the_writer_compose(sessions: sessionmaker[Session]) -> None:
     """The brief's P3 bar read literally: judge, then writer, on the same inputs."""
-    from trend_analyst.llm.schemas import JudgeBatch
 
     def judge_sender(_provider: ProviderSpec, prompt: str) -> tuple[str, int, int]:
         verdicts = [
@@ -432,7 +437,8 @@ def test_the_judge_and_the_writer_compose(sessions: sessionmaker[Session]) -> No
             for phrase in ("circ saw", "saw blade")
             if f'"phrase": "{phrase}"' in prompt
         ]
-        return JudgeBatch(verdicts=[JudgeVerdictShim(v) for v in verdicts]).model_dump_json(), 90, 40
+        batch = JudgeBatch(verdicts=[JudgeVerdict.model_validate(v) for v in verdicts])
+        return batch.model_dump_json(), 90, 40
 
     with sessions() as session:
         seed(session, phrases=("circ saw", "saw blade"), status="active")
@@ -455,7 +461,3 @@ def test_the_judge_and_the_writer_compose(sessions: sessionmaker[Session]) -> No
         assert written.briefs[0]["citations"] == 2
 
 
-def JudgeVerdictShim(payload: dict) -> object:  # noqa: N802 - a tiny builder, named for its shape
-    from trend_analyst.llm.schemas import JudgeVerdict
-
-    return JudgeVerdict.model_validate(payload)
