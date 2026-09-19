@@ -50,16 +50,47 @@ __all__ = [
     "default_chain",
 ]
 
-#: Spec §6.3's chain, in order. `kind` is only ever informational: what matters is the order
-#: and the model name, which is part of the cache key.
+#: Spec §6.3's chain, in order, with the model ids each provider's API actually accepts.
+#:
+#: Three drafts of this tuple were wrong, and the *live drill* is what caught them:
+#:   "gemini-flash" (a friendly name, not an id) -> HTTP 404
+#:   "gemini-2.0-flash" (retired for this key)  -> HTTP 404
+#:   "gemini-2.5-flash" (advertised, refused)   -> HTTP 404 "no longer available to new users"
+#:   gemini-flash-latest 503 under load        -> "experiencing high demand" (retried, then
+#:                                                 the chain's second Gemini model answers)
+#:   "llama3.3-70b" on Cerebras                 -> 404; that account serves only
+#:                                                 qwen-3.8-27b and gpt-oss-120b
+#: `gemini-flash-latest` with API version v1beta is what answers 200 for this key. Note that
+#: `GET /v1beta/models` LISTS gemini-2.5-flash as available while `generateContent` refuses it
+#: for a new account, and that the `-latest` aliases do not exist on v1: a models list is a
+#: catalogue, not a promise. A mock would have accepted every one of the wrong names, which is
+#: exactly why the brief asks for one live run.
 DEFAULT_CHAIN: Final[tuple[tuple[str, str], ...]] = (
-    ("gemini", "gemini-flash"),
-    ("groq", "llama-3.3-70b"),
-    ("cerebras", "llama-3.3-70b"),
-    ("ollama", "local"),
+    ("gemini", "gemini-flash-latest"),
+    # A second model from the same provider, and the live drill is why: Gemini answered 200 for
+    # small requests while returning HTTP 503 "experiencing high demand" for the drill's ~450-token
+    # prompt, consistently, for minutes. One model per provider is a single point of failure that
+    # the spec's chain cannot fail over from, because the next link (Groq) has no key here and the
+    # one after it (Cerebras) answers 402. The order still leads with the spec's first provider.
+    ("gemini", "gemini-3.6-flash"),
+    ("groq", "llama-3.3-70b-versatile"),
+    ("cerebras", "gpt-oss-120b"),
+    ("ollama", "llama3.2"),
 )
 
 OutcomeStatus = Literal["ok", "cached", "skipped"]
+
+#: A provider error that is worth one more attempt before failing over. Live evidence demanded
+#: this: Gemini answered HTTP 503 "currently experiencing high demand" on a perfectly valid
+#: request, and with only one paid provider configured a transient blip became a gate outage.
+#: 429 and 5xx are the provider saying "not now", not "not ever" — unlike a 404 (wrong model) or
+#: a 402 (no credit), which are permanent and must fail over immediately.
+_TRANSIENT_MARKERS: Final[tuple[str, ...]] = (
+    "429", "500", "502", "503", "504", "high demand", "overloaded", "timeout", "timed out",
+    "temporarily",
+)
+#: Attempts per provider for a *transient* error, including the first.
+_TRANSIENT_ATTEMPTS: Final = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +182,12 @@ def _sum_tokens(*values: int) -> int:
     return sum(int(value) for value in values)
 
 
+def _is_transient(message: str) -> bool:
+    """True when a provider error is worth another attempt rather than an immediate failover."""
+    lowered = message.lower()
+    return any(marker in lowered for marker in _TRANSIENT_MARKERS)
+
+
 def call_gate(
     session: Session,
     *,
@@ -225,8 +262,13 @@ def call_gate(
 
     attempts = 0
     failures: list[str] = []
+
     for provider in providers:
-        for attempt in range(2):  # schema violation: retry once, then move on (spec §6.3)
+        # Two retry budgets, kept apart on purpose. The first draft shared one 2-iteration loop
+        # for both, which silently capped transient retries at two and made _TRANSIENT_ATTEMPTS a
+        # constant that lied about the behaviour.
+        schema_retries = 0
+        for attempt in range(1, _TRANSIENT_ATTEMPTS + 1):
             attempts += 1
             if dry_run:
                 failures.append(f"{provider}: dry run, provider not called")
@@ -234,13 +276,21 @@ def call_gate(
             try:
                 raw, prompt_tokens, completion_tokens = sender(provider, prompt)
             except Exception as exc:  # any provider failure fails over, never aborts the gate
-                failures.append(f"{provider}: transport error: {exc}")
+                message = str(exc)
+                failures.append(f"{provider}: transport error: {message}")
+                if _is_transient(message) and attempt < _TRANSIENT_ATTEMPTS:
+                    # Bounded, and only for "not now" errors: a 404 (wrong model) or a 402 (no
+                    # credit) is permanent and moves on immediately.
+                    continue
                 break
 
             outcome = parse_gate_output(raw, schema)
             if outcome.failed:
-                failures.append(f"{provider} attempt {attempt + 1}: {outcome.reason}")
-                continue  # the one retry
+                failures.append(f"{provider} attempt {attempt}: {outcome.reason}")
+                if schema_retries < 1:  # spec §6.3: a schema violation retries once
+                    schema_retries += 1
+                    continue
+                break
 
             assert outcome.value is not None  # parse_gate_output guarantees it when ok
             cleaned, removed = _ground(outcome.value, evidence_urls)

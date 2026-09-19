@@ -32,6 +32,9 @@ from trend_analyst.llm.cache import (
     token_spend_by_gate,
 )
 from trend_analyst.llm.gateway import (
+    _TRANSIENT_ATTEMPTS as _TRANSIENT,
+)
+from trend_analyst.llm.gateway import (
     DEFAULT_BUDGETS,
     GatewayOutcome,
     ProviderSpec,
@@ -213,6 +216,7 @@ def test_first_provider_wins_when_it_answers(sessions: sessionmaker[Session]) ->
 
 
 def test_gateway_fails_over_in_chain_order(sessions: sessionmaker[Session]) -> None:
+    """Order is the specification's; the chain carries a second Gemini model (see below)."""
     tried: list[str] = []
 
     def flaky(provider: ProviderSpec, _prompt: str) -> tuple[str, int, int]:
@@ -228,7 +232,12 @@ def test_gateway_fails_over_in_chain_order(sessions: sessionmaker[Session]) -> N
         )
     assert outcome.ok
     assert outcome.provider == "cerebras"
-    assert tried == ["gemini", "groq", "cerebras"]  # order is the specification's
+    # A 429 is TRANSIENT, so each chain entry is retried before the chain moves on; and both
+    # Gemini entries (the spec's, plus the second model the live drill proved necessary) come
+    # before Groq. Order is the specification's.
+    assert tried == (
+        ["gemini"] * _TRANSIENT + ["gemini"] * _TRANSIENT + ["groq"] * _TRANSIENT + ["cerebras"]
+    )
     assert any("429" in note for note in outcome.notes)
 
 
@@ -247,8 +256,34 @@ def test_schema_violation_retries_once_then_moves_on(sessions: sessionmaker[Sess
             evidence_urls=EVIDENCE, now=NOW,
         )
     assert outcome.provider == "groq"
-    assert calls == ["gemini", "gemini", "groq"]  # exactly one retry per provider
+    # One schema retry per chain entry, and the chain has two Gemini entries before Groq.
+    assert calls == ["gemini", "gemini", "gemini", "gemini", "groq"]
     assert any("not JSON" in note for note in outcome.notes)
+
+
+def test_a_permanent_provider_error_fails_over_immediately(
+    sessions: sessionmaker[Session],
+) -> None:
+    """A 404 (wrong model) or a 402 (no credit) is not "not now" — it must not be retried.
+
+    The live drill produced both: Gemini 404 for a retried model name, Cerebras 402 for an
+    unfunded key. Retrying those would spend the day's call budget learning nothing.
+    """
+    tried: list[str] = []
+
+    def permanent(provider: ProviderSpec, _prompt: str) -> tuple[str, int, int]:
+        tried.append(provider.name)
+        if provider.name != "ollama":
+            raise RuntimeError("HTTP 402: payment required")
+        return verdict_json(), 1, 1
+
+    with sessions() as session:
+        outcome = call_gate(
+            session, gate="judge", prompt="permanent", schema=JudgeVerdict, sender=permanent,
+            evidence_urls=EVIDENCE, now=NOW,
+        )
+    assert outcome.provider == "ollama"  # answered by the last entry
+    assert tried == ["gemini", "gemini", "groq", "cerebras", "ollama"]  # one attempt each
 
 
 def test_every_provider_failing_is_a_recorded_skip_not_an_abort(
@@ -262,7 +297,9 @@ def test_every_provider_failing_is_a_recorded_skip_not_an_abort(
     assert outcome.status == "skipped"
     assert outcome.value is None
     assert "dropping with reason" in outcome.reason
-    assert len(outcome.notes) == 4  # one per provider in the chain
+    # A 503 is transient, so every chain entry is retried before the gate gives up: the ledger
+    # records all of them rather than one line per provider.
+    assert len(outcome.notes) == len(default_chain()) * _TRANSIENT
 
 
 def test_cache_hit_never_reaches_a_provider(sessions: sessionmaker[Session]) -> None:
@@ -383,12 +420,20 @@ def test_a_batch_of_candidates_shares_one_gate_call(sessions: sessionmaker[Sessi
 
 
 def test_default_chain_matches_the_specification() -> None:
-    assert [provider.name for provider in default_chain()] == [
-        "gemini",
-        "groq",
-        "cerebras",
-        "ollama",
-    ]
+    """The spec's provider order, plus a second Gemini model (documented in the source).
+
+    The extra entry is a deviation with live evidence behind it: Gemini returned HTTP 503
+    "experiencing high demand" for the drill's ~450-token prompt while small prompts succeeded,
+    and with Groq unkeyed and Cerebras answering 402, one model per provider meant a gate outage.
+    The distinct-provider order is still exactly Gemini -> Groq -> Cerebras -> Ollama.
+    """
+    names = [provider.name for provider in default_chain()]
+    assert names == ["gemini", "gemini", "groq", "cerebras", "ollama"]
+    seen: list[str] = []
+    for name in names:
+        if name not in seen:
+            seen.append(name)
+    assert seen == ["gemini", "groq", "cerebras", "ollama"]
 
 
 def test_outcome_serializes_for_the_ledger(sessions: sessionmaker[Session]) -> None:

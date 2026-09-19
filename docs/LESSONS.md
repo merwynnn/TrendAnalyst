@@ -89,6 +89,36 @@ or this file — and preferably encoded in a check rather than a sentence.
 
 ---
 
+## 6. Live-only failures: what a mock cannot tell you (P3)
+
+The brief asks for mocked provider responses *and then exactly one live run*. The live run
+found four things no mock would have, and every one of them was a **configuration fiction**:
+
+| # | Bug | Symptom | Root cause | Fix | Prevention |
+|---|---|---|---|---|---|
+| 6.1 | **Friendly model names are not model ids** | Three different chain drafts 404ed on every provider | "gemini-flash", "gemini-2.0-flash", "llama3.3-70b" (Cerebras serves only qwen-3.8-27b / gpt-oss-120b) | Chain carries ids read from `GET /v1beta/models` and `GET /v1/models` | The drill fails loudly on the first request; the ids are recorded in the source with the reason |
+| 6.2 | **A models list is a catalogue, not a promise** | `GET /v1beta/models` listed `gemini-2.5-flash`; `generateContent` answered 404 "no longer available to new users" | Google advertises models a new key cannot call | Used `gemini-flash-latest` on `v1beta` (200 OK) | Never trust a capability list; make one real call |
+| 6.3 | **A transient 5xx was treated as permanent** | Gemini answered 503 "experiencing high demand" for the ~450-token drill prompt while small prompts succeeded; the gate reported total failure | The gateway failed over on every provider error | Bounded transient retry (3 attempts) for 429/5xx/timeout, immediate failover for 404/402 | Two retry budgets tested separately: transient vs permanent, and a test asserts a 402 fails over at once |
+| 6.4 | **One model per provider is a single point of failure** | With Groq unkeyed and Cerebras answering 402, one overloaded Gemini model meant a gate outage | The chain had nothing to fail over *to* | A second Gemini model in the chain, documented as a deviation with the live evidence | The chain is asserted by distinct-provider order, so an extra model cannot silently reorder providers |
+
+**And two failures in the drill itself, which are the same class as §1 — a check that measured
+nothing:**
+
+* **Probes interfered through the cache.** A previous run's probe-2 call had warmed that exact
+  key, so the next run's failover probe was "answered by cache" — green-looking and empty. Each
+  probe now carries a fresh nonce; only the cache probe deliberately reuses probe 1's input.
+* **`_TRANSIENT_ATTEMPTS` was a constant that lied.** Both retry rules (schema-once,
+  transient-three) shared one 2-iteration loop, so the transient budget was unreachable. A test
+  comparing the recorded attempt count against the constant caught it.
+
+| 6.5 | **The free tier is smaller than the spec's budgets assume** | After ~9.4k tokens of drill runs, Gemini answers HTTP 429 for every request | Spec §6.2's caps (Judge ~20 calls, Writer ~30) are runaway backstops, not free-tier planning: one night is ~14k tokens | The gate degraded correctly with a reason; the *budget numbers* are now P4's decision (shrink to the tier, or fund a key, or let the 30-day cache carry the load) | The token log measures real spend per gate, so the next nightly plan is built on measured numbers instead of the spec's estimates |
+
+**The rule this class earned:** *a mocked provider verifies the gateway; only a live provider
+verifies the configuration.* The gateway logic was right the whole time — the model names, the
+credits and the load were not, and no mock could have said so.
+
+---
+
 ## Open items (known, with the phase that addresses them)
 
 | # | Item | Why it is open | Phase |
