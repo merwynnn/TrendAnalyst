@@ -1,11 +1,11 @@
 ---
 # TrendAnalyst-zai8
 title: T3 — sources.yaml registry + Tier-A-in-L0 hard-fail
-status: todo
+status: in-progress
 type: task
 priority: high
 created_at: 2026-09-19T11:42:42Z
-updated_at: 2026-09-19T11:42:43Z
+updated_at: 2026-09-19T12:06:11Z
 parent: TrendAnalyst-l15l
 blocked_by:
     - TrendAnalyst-376u

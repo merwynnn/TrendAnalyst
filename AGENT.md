@@ -11,6 +11,11 @@ uv run python -m trend_analyst.health            # human view
 uv run python -m trend_analyst.health --json      # machine view (parse this)
 echo $?                                           # 0 healthy / 1 degraded / 2 down
 
+# What is the system ACTUALLY configured with? (secrets always redacted)
+uv run python -m config.cli show
+uv run python -m config.cli show --json --env prod          # what prod would run with
+uv run python -m config.cli show --set app.log_level=DEBUG  # CLI layer beats env/YAML
+
 # What was I doing / what is left
 beans list --json --ready
 beans show <bean-id>
@@ -20,11 +25,14 @@ uv run pytest -m "not db"     # no database needed
 uv run pytest                 # full suite, needs local Postgres
 uv run ruff check .
 uv run mypy src config
+bash scripts/gate.sh          # all of the above, as markdown evidence
 
-# Local Postgres (WSL) up / down
-wsl -d Ubuntu -u root -- pg_ctlcluster 18 main start
-wsl -d Ubuntu -u root -- pg_ctlcluster 18 main status
-wsl -d Ubuntu -u root -- bash scripts/provision_pg.sh    # idempotent re-provision
+# Local Postgres (WSL). WSL kills idle distros, so db_up.sh parks a keep-alive:
+# a bare `pg_ctlcluster start` will look healthy and then vanish.
+bash scripts/db_up.sh            # idempotent; waits for 127.0.0.1:5432 to answer
+bash scripts/db_down.sh          # terminates the distro (stops ALL WSL work in it)
+wsl -d Ubuntu -u root -- pg_lsclusters
+bash scripts/provision_pg.sh     # idempotent re-provision (role, database, pgvector)
 
 # Migrations
 uv run alembic upgrade head

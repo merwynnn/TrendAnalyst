@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------------------
+# Trend Analyst — base configuration (spec §10).
+#
+# Lowest layer of the config stack: defaults < THIS FILE < settings.<env>.yaml
+# < secrets.local.yaml (untracked) < .env < environment TA_* < CLI --set.
+#
+# It contains NO secrets. Credentials live in config/secrets.local.yaml, which is
+# untracked, and every key is a SecretStr (never logged, never dumped).
+#
+# Unknown keys are a startup error, not a silent no-op: every section forbids extras.
+# ---------------------------------------------------------------------------
+
+app:
+  env: dev
+  log_level: INFO
+  log_json: true          # structured logs with run_id on every line (spec §9)
+  dry_run: false          # true = never write to the outside world
+  timezone: UTC           # all timestamps stored UTC; display is a presentation concern
+
+db:
+  echo_sql: false         # true = log every statement (noisy; debugging only)
+  pool_size: 5
+  connect_timeout_s: 10
+  statement_timeout_ms: 30000
+  pgvector_required: true # migration 0001 creates the extension (spec §11 stack)
+
+llm:
+  ollama_base_url: "http://localhost:11434"
+
+# Gate budgets are hard caps enforced in code, never in prompts (spec §6.2 / brief §7).
+# Planner ~1 call/week, Judge ~20 calls/night batched, Writer ~30 calls/night top-K only.
+gates:
+  planner:
+    max_calls: 2
+    max_tokens: 8000
+  judge:
+    max_calls: 20
+    max_tokens: 120000
+  writer:
+    max_calls: 30
+    max_tokens: 200000
+
+# Effort budgets for the deterministic pipeline.
+budgets:
+  max_candidates_per_gate: 200   # the LLM never sees unpruned L0 volume
+  max_enrich_calls_per_night: 300 # Tier-A quota leash (spec §4.3)
+  max_writer_revisions: 1         # evaluator-optimizer: one revision, no loops
+  prune_fraction: 0.95            # L1 drops 95 % of candidates (spec §2)
+  top_k: 25                       # survivors that get Tier-A enrichment in L2
+
+retention:
+  raw_items_ttl_days: 90   # the raw lake expires (spec §5.4)
+  llm_cache_ttl_days: 30   # identical inputs never hit a provider twice (spec §6.3)
+
+health:
+  quota_burn_alert_pct: 80.0        # alert when a source burns 80 % of its daily budget
+  judge_keep_rate_band: [0.05, 0.40] # starting band; tuned once real runs exist (P5)
+  eval_baseline_drop_alert: 2.0      # release rule: no rubric drops >2 points (spec §8)
+  outbox_path: outbox/alerts.jsonl   # alerts land here for the monitor agent to triage

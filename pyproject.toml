@@ -82,6 +82,9 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN201", "ANN001", "PLR2004", "S101"]
 "migrations/**" = ["ANN", "ERA", "INP001"]
+# CLI entry points exist to print: stdout is their interface, not a debugging trace.
+"**/cli.py" = ["T201"]
+"src/trend_analyst/monitor/health.py" = ["T201"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["trend_analyst", "config"]

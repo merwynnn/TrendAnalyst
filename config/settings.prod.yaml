@@ -1,0 +1,12 @@
+# ---------------------------------------------------------------------------
+# Trend Analyst — production overrides (selected by TA_ENV=prod).
+#
+# Only keys that differ from config/settings.yaml belong here: this file is a diff,
+# not a copy, so there is exactly one place to change a value.
+# ---------------------------------------------------------------------------
+
+app:
+  env: prod
+  # Structured logs with run_id on every line; the monitor agent and CI parse these.
+  log_json: true
+  log_level: INFO

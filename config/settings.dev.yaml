@@ -1,0 +1,11 @@
+# ---------------------------------------------------------------------------
+# Trend Analyst — development overrides (selected by TA_ENV=dev, the default).
+#
+# Only keys that differ from config/settings.yaml belong here: this file is a diff,
+# not a copy, so there is exactly one place to change a value.
+# ---------------------------------------------------------------------------
+
+app:
+  # Human-readable logs while developing; CI and prod use the JSON formatter (spec §9).
+  log_json: false
+  log_level: DEBUG

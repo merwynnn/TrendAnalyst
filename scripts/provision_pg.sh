@@ -87,7 +87,7 @@ else
 # Trend Analyst - LOCAL SECRETS. Untracked (see .gitignore). NEVER commit this file.
 # Keys live here rather than in the environment. Fill the blanks by hand as each
 # provider gets wired up. See config/secrets.example.yaml for the template.
-database:
+db:
   url: "${DSN}"
 llm:
   gemini_api_key: ""

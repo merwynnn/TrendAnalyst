@@ -56,6 +56,32 @@ check "pytest — no database, no network" uv run pytest -q -m "not db"
 check "ruff — lint clean" uv run ruff check .
 check "mypy — strict, python_version=3.12" uv run mypy src config
 
+# --- configuration ------------------------------------------------------------
+config_cli_probe() {
+  uv run python - <<'PY'
+import json
+import subprocess
+import sys
+
+out = subprocess.run(
+    [sys.executable, "-m", "config.cli", "show", "--json"],
+    capture_output=True,
+    text=True,
+    check=True,
+)
+data = json.loads(out.stdout)
+layers = ", ".join(
+    f"{layer['label']}={'loaded' if layer['exists'] else 'absent'}" for layer in data["layers"]
+)
+redacted = data["settings"]["db"]["url"] in ("", "***")
+print(f"layers (high->low): {layers}")
+print(f"credentials configured: {sum(1 for ok in data['credentials_configured'].values() if ok)}")
+print(f"db.url redacted: {redacted}")
+assert redacted, "the config CLI leaked a secret"
+PY
+}
+check "config CLI — every layer resolved, secrets redacted" config_cli_probe
+
 # --- needs Postgres ----------------------------------------------------------
 if uv run python -c "
 import socket, sys

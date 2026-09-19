@@ -101,8 +101,10 @@ decision the human approved or an addition the spec layout does not name.
 | D1 | Runtime interpreter is the **system Python 3.14.6**, not 3.12 (spec §11) | Human instruction: "use the python installed on the system, do not install another python." Code stays 3.12-portable: `ruff target-version = py312` and `mypy python_version = 3.12` reject 3.13+ syntax. |
 | D2 | `config/` is an importable package (`config/settings.py` per spec §3 lives outside `src/`) | Decision B2a — keeps every spec path while allowing type-checked imports. |
 | D3 | `src/trend_analyst/health.py` exists alongside `monitor/health.py` | Spec conflict C1: §3 puts health in `monitor/`, §9 mandates `python -m trend_analyst.health`. The shim re-exports; both hold. |
-| D4 | `src/trend_analyst/logging.py`, `docs/`, `alembic.ini`, `.github/`, `tests/*/` subpackages | The spec layout has no home for structured logging, evidence logs, migrations config or CI. Additions only. |
+| D4 | `src/trend_analyst/logging.py`, `config/cli.py`, `docs/`, `alembic.ini`, `.github/`, `tests/*/` subpackages | The spec layout has no home for structured logging, a config inspector, evidence logs, migrations config or CI. Additions only. |
 | D5 | Dossiers moved from the repo root to `docs/dossiers/` | Spec §3: "nothing ad-hoc at root". |
+| D6 | `config/secrets.local.yaml` is the credential store (env vars remain an optional override) | Human instruction B4: "don't put the api keys on environment variable, let them in a file". Spec §10 allows either. |
+| D7 | Postgres runs in WSL (Ubuntu 26.04, PG 18 + pgvector) and is held up by `scripts/db_up.sh` | Human decision B1a. WSL terminates idle distros (measured), so a parked `sleep infinity` keeps it reachable — the alternative, a native Windows build, cannot install pgvector without an MSVC toolchain. |
 
 ## Rules of the road
 
