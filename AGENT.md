@@ -56,6 +56,13 @@ uv run python -m trend_analyst.pipeline.orchestrator --judge-replay tests/data/l
                                                             # the Judge gate offline over a REAL recorded answer
 uv run python -m trend_analyst.pipeline.orchestrator --judge  # the Judge gate live (needs a provider key)
 uv run python -m scripts.llm_drill             # one live run: failover + cache + accounting + grounding
+uv run python -m scripts.nightly               # every layer, then the ledger reconciliation
+uv run python -m scripts.nightly --offline --dry-run   # the same path on fixtures, no network, no spend
+uv run python -m scripts.ttl_job [--dry-run]   # expire the raw lake and the LLM cache; never the ledger
+uv run python -m evals.run_evals               # the golden cases against the current database
+uv run python -m trend_analyst.pipeline.orchestrator --history-delta "circ saw"   # what moved, and why
+uv run python -m trend_analyst.pipeline.orchestrator --briefs                     # stored briefs
+uv run python -m trend_analyst.pipeline.orchestrator --write-replay tests/data/llm/writer_brief.json --fresh
 uv run python -m scripts.seed_evals --count 10                         # seed golden eval cases from real output
 uv run python -m scripts.category_coverage                             # how much of the lake the taxonomy matches
 uv run python -m trend_analyst.pipeline.orchestrator --json            # machine-readable
