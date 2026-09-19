@@ -78,13 +78,49 @@ class EvalReport:
     """Every case's result, plus the summary the gate looks at."""
 
     total: int = 0
-    passed: int = 0
-    skipped: int = 0
     results: list[CaseResult] = field(default_factory=list)
+    # Note: no mutable passed/skipped counters here on purpose. Counting inside `run_cases` while
+    # also classifying from `results` produced a report that said "2/50 passed (48 skipped)" for a
+    # run in which 48 cases genuinely passed their checks — two sources of truth, one wrong.
+
+    @property
+    def verified(self) -> int:
+        """Cases whose every check ran and passed, including keep/drop."""
+        return sum(
+            1
+            for result in self.results
+            if result.checks and all(result.checks.values()) and "keep_drop" in result.checks
+        )
+
+    @property
+    def partial(self) -> int:
+        """Cases whose deterministic checks passed but whose keep/drop check is still pending.
+
+        Counted separately on purpose: a case whose keep/drop was never verified is not green, and
+        folding it into "verified" would let an unjudged case sit inside a report that says
+        everything is fine — the dishonesty these labels exist to prevent.
+        """
+        return sum(
+            1
+            for result in self.results
+            if result.checks and all(result.checks.values()) and "keep_drop" not in result.checks
+        )
 
     @property
     def failed(self) -> int:
-        return self.total - self.passed - self.skipped
+        """Cases where a check ran and did not hold — the only count §8's bar is about."""
+        return sum(1 for result in self.results if result.checks and not
+            all(result.checks.values()))
+
+    @property
+    def unchecked(self) -> int:
+        """Cases that could not be checked at all (no candidate, no snapshot): reported, not set
+        aside."""
+        return sum(1 for result in self.results if not result.checks)
+
+    @property
+    def pending_checks(self) -> int:
+        return sum(1 for result in self.results if "keep_drop" not in result.checks)
 
     @property
     def ok(self) -> bool:
@@ -93,22 +129,37 @@ class EvalReport:
     def as_dict(self) -> dict[str, Any]:
         return {
             "total": self.total,
-            "passed": self.passed,
+            "verified": self.verified,
+            "partial": self.partial,
             "failed": self.failed,
-            "skipped": self.skipped,
+            "unchecked": self.unchecked,
+            "pending_checks": self.pending_checks,
             "results": [result.as_dict() for result in self.results],
             "ok": self.ok,
         }
 
     def render(self) -> str:
-        lines = [f"eval cases: {self.passed}/{self.total} passed ({self.skipped} skipped)"]
+        lines = [
+            f"eval cases: {self.total} · verified {self.verified} · "
+            f"partial {self.partial} (keep/drop not judged yet) · failed {self.failed} · "
+            f"unchecked {self.unchecked}",
+            f"ok={self.ok} (no case regressed; {self.pending_checks} case(s) still have an "
+            "unverified keep/drop check — this is not the same as green)",
+        ]
         for result in self.results:
-            mark = "PASS" if result.passed else ("SKIP" if not result.checks else "FAIL")
+            if not result.checks:
+                mark = "UNCHECKED"
+            elif not all(result.checks.values()):
+                mark = "FAIL"
+            elif "keep_drop" in result.checks:
+                mark = "VERIFIED"
+            else:
+                mark = "PARTIAL"
             detail = ", ".join(
                 f"{name}={'ok' if ok else 'no'}" for name, ok in result.checks.items()
             )
-            lines.append(f"  {mark}  {result.case_id[:52]:<52} {detail}")
-            lines.extend(f"        {reason}" for reason in result.reasons)
+            lines.append(f"  {mark:<9} {result.case_id[:46]:<46} {detail}")
+            lines.extend(f"            {reason}" for reason in result.reasons)
         return "\n".join(lines)
 
 
@@ -121,6 +172,67 @@ def load_cases(path: Path = CASES_PATH) -> list[dict[str, Any]]:
     if not isinstance(cases, list):
         raise ValueError(f"{path}: 'cases' must be a list")
     return [case for case in cases if isinstance(case, dict)]
+
+
+def relabel(
+    case_id: str,
+    *,
+    expect_keep: bool,
+    reason: str,
+    cases_path: Path = CASES_PATH,
+) -> tuple[bool, bool]:
+    """Re-label one case's keep/drop expectation, in the YAML *and* in the database.
+
+    A label conflict is a signal, not a bug: the baseline label comes from the documented
+    phrase-quality threshold, while a Judge verdict comes from a reading of the evidence. When the
+    Judge disagrees and its reasoning is defensible, the label is what changes — and this is the
+        only
+    supported way to change it: it demands a reason and writes that reason into the case's `notes`,
+    so the next reader can see who moved the bar and why.
+
+    Returns ``(found, changed)``.
+    """
+    payload = yaml.safe_load(cases_path.read_text(encoding="utf-8")) or {}
+    cases = payload.get("cases") or []
+    target = next((case for case in cases if str(case.get("id")) == case_id), None)
+    if target is None:
+        return False, False
+    if bool(target.get("expected_keep")) == expect_keep and reason in str(target.get("notes", "")):
+        return True, False
+
+    label = "keep" if expect_keep else "drop"
+    stamp = datetime.now(UTC).strftime("%Y-%m-%d")
+    target["expected_keep"] = expect_keep
+    target["notes"] = (
+        f"{target.get('notes', '')} | re-labelled to {label} on {stamp}: {reason}"
+    ).strip(" |")
+    payload["cases"] = cases
+    cases_path.write_text(
+        yaml.safe_dump(payload, sort_keys=False, allow_unicode=True, width=100),
+        encoding="utf-8",
+        newline="\n",
+    )
+    return True, True
+
+
+def _relabel_in_database(case_id: str, *, expect_keep: bool, reason: str) -> bool:
+    """Mirror a re-label into `eval_cases` so the runner and the DB agree."""
+    from trend_analyst.store.db import create_db_engine, create_session_factory  # noqa: PLC0415
+    from trend_analyst.store.models import EvalCase  # noqa: PLC0415
+
+    engine = create_db_engine()
+    sessions = create_session_factory(engine)
+    try:
+        with sessions() as session:
+            row = session.get(EvalCase, case_id)
+            if row is None:
+                return False
+            row.expected_keep = expect_keep
+            row.notes = f"{row.notes or ''} | re-labelled: {reason}".strip(" |")
+            session.commit()
+    finally:
+        engine.dispose()
+    return True
 
 
 def run_cases(
@@ -149,7 +261,6 @@ def run_cases(
             # A case whose candidate no longer exists cannot be checked. Reported as skipped with a
             # reason rather than silently passed: the seeded cases come from real runs, and mining
             # rules do change.
-            report.skipped += 1
             result.passed = False
             result.reasons.append("no candidate with that phrase in the database")
             result.checks = {}
@@ -158,7 +269,6 @@ def run_cases(
 
         points = history(session, phrase=phrase)
         if not points:
-            report.skipped += 1
             result.passed = False
             result.reasons.append("no score snapshot for that candidate")
             report.results.append(result)
@@ -191,15 +301,13 @@ def run_cases(
             .limit(1)
         ).scalars().first()
         if judgement is None and not require_judgement:
-            report.skipped += 1
+            # partial, not verified: the deterministic checks ran, the Judge's verdict has not
             result.reasons.append("not judged yet: keep/drop not checked")
             report.results.append(result)
             continue
         _check_keep_drop(result, case=case, judgement=judgement)
 
         result.passed = all(result.checks.values()) if result.checks else False
-        if result.passed:
-            report.passed += 1
         report.results.append(result)
     return report
 
@@ -226,6 +334,34 @@ def _check_keep_drop(
         )
 
 
+def _relabel_cli(args: argparse.Namespace) -> int:
+    """Handle --relabel: change one case's label in the YAML and the database, with a reason."""
+    if not args.to or not args.reason:
+        print("--relabel needs --to keep|drop and --reason '<why>'", file=sys.stderr)
+        return 2
+    try:
+        found, _changed = relabel(
+            args.relabel,
+            expect_keep=args.to == "keep",
+            reason=args.reason,
+            cases_path=Path(args.cases),
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"cannot re-label: {exc}", file=sys.stderr)
+        return 1
+    if not found:
+        print(f"no case with id {args.relabel!r} in {args.cases}", file=sys.stderr)
+        return 1
+    mirrored = _relabel_in_database(
+        args.relabel, expect_keep=args.to == "keep", reason=args.reason
+    )
+    print(
+        f"re-labelled {args.relabel} to {args.to}"
+        f"{' (yaml + database)' if mirrored else ' (yaml only: no eval_cases row)'}"
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m evals.run_evals",
@@ -240,7 +376,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--config-dir", default=None)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--relabel",
+        metavar="CASE_ID",
+        default=None,
+        help="re-label one case's keep/drop expectation (requires --to and --reason)",
+    )
+    parser.add_argument("--to", choices=("keep", "drop"), default=None)
+    parser.add_argument(
+        "--reason", default=None, help="why the label changed (stored with the case)"
+    )
     args = parser.parse_args(argv)
+
+    if args.relabel:
+        return _relabel_cli(args)
 
     try:
         engine = create_db_engine()

@@ -11,6 +11,7 @@ Two halves:
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -31,7 +32,14 @@ from trend_analyst.monitor.health import (
     source_status,
 )
 from trend_analyst.sources.registry import load_registry
-from trend_analyst.store.models import Candidate, EvalCase, QuotaLedger, Run, RunSourceLog
+from trend_analyst.store.models import (
+    Candidate,
+    EvalCase,
+    QuotaLedger,
+    Run,
+    RunSourceLog,
+    Source,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +53,9 @@ from trend_analyst.store.models import Candidate, EvalCase, QuotaLedger, Run, Ru
         ({"enabled": True, "last_status": None}, "never_run", True),
         ({"enabled": True, "last_status": "ok"}, "ok", False),
         ({"enabled": True, "last_status": "degraded"}, "degraded", True),
-        ({"enabled": True, "last_status": "skipped"}, "degraded", True),
+        # A skip is a coverage fact, not an incident: twelve keyless sources skipping used to turn
+        # every health check into DEGRADED, which is how a monitor learns to ignore health output.
+        ({"enabled": True, "last_status": "skipped"}, "skipped", True),
         ({"enabled": True, "last_status": "failed"}, "down", False),
         ({"enabled": True, "last_status": "something-new"}, "degraded", True),
         ({"enabled": True, "last_status": "ok", "rate_limit_hits": 3}, "degraded", True),
@@ -59,6 +69,57 @@ def test_source_status_rules(
     status, reasons = source_status(**kwargs)  # type: ignore[arg-type]
     assert status == expected_status
     assert bool(reasons) is expect_reason
+
+
+def test_skipped_sources_do_not_make_the_system_degraded(
+    db_session: Session, repo_root: Path
+) -> None:
+    """The regression the rule above prevents, stated as an end-to-end health report."""
+    run = Run(
+        id=uuid.uuid4(),
+        started_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
+        status="ok",
+        trigger="nightly",
+        layer_status={},
+    )
+    db_session.add(run)
+    db_session.flush()
+    # Two sources the registry enables but that are skipped at run time (no plugin/fixture yet) —
+    # the real shape of the dev system, and the one that used to turn health DEGRADED.
+    for source_id in ("common_crawl_index", "google_books"):
+        db_session.add(
+            Source(
+                id=source_id,
+                role="waits for a plugin",
+                tier="S",
+                layers=["L0"],
+                schedule="nightly",
+                budget_per_day=10,
+                rps=1.0,
+                domains=["example.com"],
+                enabled=True,
+            )
+        )
+        db_session.add(
+            RunSourceLog(
+                run_id=run.id,
+                source_id=source_id,
+                status="skipped",
+                reason="no credential: set tier_a.ebay_client_id",
+                started_at=datetime.now(UTC),
+            )
+        )
+    db_session.flush()
+
+    report = report_from(db_session, repo_root)
+    by_id = {source.source_id: source for source in report.sources}
+    assert by_id["common_crawl_index"].status == "skipped"
+    assert by_id["google_books"].status == "skipped"
+    assert report.counts()["skipped"] == 2
+    assert report.counts()["degraded"] == 0
+    assert report.status == "healthy"
+    assert report.exit_code == ExitCode.HEALTHY
 
 
 def test_rate_limit_reason_names_the_count() -> None:
@@ -240,7 +301,7 @@ def test_empty_database_is_healthy(health_inputs: HealthInputs) -> None:
 def test_empty_database_renders_healthy_for_a_human(health_inputs: HealthInputs) -> None:
     text = render_text(collect_health(health_inputs))
     assert "HEALTHY (exit 0)" in text
-    assert "0 ok · 0 degraded · 0 down · 15 never_run · 7 disabled" in text
+    assert "0 ok · 0 degraded · 0 down · 0 skipped · 15 never_run · 7 disabled" in text
     assert "quota: 0 / 22400 requests today" in text
 
 

@@ -300,9 +300,9 @@ PROBE
 }
 check "P4 nightly — all layers then a balanced ledger" p4_probe
 eval_probe() {
-# Spec 8's eval half: the seeded golden cases must still describe the system. Bands and labels are
-# checked always; keep/drop only where a Judge verdict exists, which the report makes visible rather
-# than hiding behind a pass.
+# Spec 8's eval half: the golden cases must still describe the system. Bands and labels are checked
+# always; keep/drop only where a Judge verdict exists, which the report makes visible (as `partial`)
+# rather than hiding behind a pass.
 local out
 out=$(uv run python -m evals.run_evals --json 2>/dev/null)
 printf '%s' "$out" > "${TMPDIR:-/tmp}/ta_eval.json"
@@ -311,17 +311,111 @@ import json, sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     payload = json.load(handle)
 checked = [r for r in payload["results"] if r["checks"]]
-print(f"cases: {payload['total']} · checked: {len(checked)} · passed: {payload['passed']} · "
-      f"failed: {payload['failed']} · skipped: {payload['skipped']}")
-for result in checked[:3]:
+print(f"cases: {payload['total']} · verified: {payload['verified']} · partial: {payload['partial']} "
+      f"(keep/drop unjudged) · failed: {payload['failed']} · unchecked: {payload['unchecked']}")
+for result in checked[:2]:
     print(f"  {result['id'][:46]:<46} {result['checks']}")
-assert payload["total"] >= 10, "the golden case set must not shrink"
+assert payload["total"] >= 50, "spec 8 requires 50 golden cases; the set must not shrink"
 assert checked, "at least one case must be checkable"
 assert payload["failed"] == 0, [r["reasons"] for r in payload["results"] if r["reasons"]]
 assert all(r["checks"].get("score_band", True) for r in checked), "score bands must hold"
+assert all(r["checks"].get("fad_label", True) for r in checked), "fad labels must hold"
+# The unverified check is stated, not glossed: the cases whose keep/drop has no verdict yet are
+# counted, so "0 failed" can never be read as "all 50 confirmed".
+print(f"  note: {payload['pending_checks']} case(s) await a Judge verdict for keep/drop")
 PROBE
 }
-check "evals — golden cases still describe the system" eval_probe
+check "evals — 50 golden cases still describe the system" eval_probe
+
+runbook_probe() {
+# Spec 8's monitor half: the five runbooks must have been rehearsed against staging, and the
+# rehearsal must have passed rather than merely run. The drill drops and recreates a throwaway
+# database (scripts/staging_db.sh) and prints one line per incident.
+local out
+out=$(uv run python -m scripts.runbook_drill 2>&1)
+printf '%s
+' "$out" > "${TMPDIR:-/tmp}/ta_runbook.txt"
+printf '%s
+' "$out" | tail -12
+printf '%s
+' "$out" | grep -q "RUNBOOK DRILL: PASS" || return 1
+local incidents
+incidents=$(printf '%s
+' "$out" | grep -c ": PASS")
+[ "$incidents" -ge 6 ] || return 1
+# The transcript is the artifact; a drill that does not write it proves nothing later.
+grep -q "Spec §8" docs/evidence/P5-runbooks.md || return 1
+grep -q "verifiable" docs/evidence/P5-runbooks.md 2>/dev/null || true
+grep -q "Escalation template" docs/evidence/P5-runbooks.md || return 1
+return 0
+}
+check "P5 runbooks — five incidents rehearsed against staging" runbook_probe
+
+alerts_probe() {
+# The monitor's inbox must be reachable and must be able to say "silent". Both matter: an alert
+# command that crashes is invisible until the night it is needed, and one that always complains is
+# noise. The probe runs it twice (text and JSON) and requires each to be one document.
+local text json_out
+text=$(uv run python -m trend_analyst.monitor.alerts 2>/dev/null) || return 1
+[ -n "$text" ] || return 1
+json_out=$(uv run python -m trend_analyst.monitor.alerts --json 2>/dev/null) || return 1
+printf '%s' "$json_out" > "${TMPDIR:-/tmp}/ta_alerts.json"
+uv run python - "${TMPDIR:-/tmp}/ta_alerts.json" <<'PROBE' || return 1
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    alerts = json.load(handle)
+assert isinstance(alerts, list), "the alert CLI must print one JSON array"
+required = {"rule", "severity", "runbook", "symptom", "tier", "action", "reversible_with"}
+for alert in alerts:
+    missing = required - set(alert)
+    assert not missing, f"alert {alert.get('rule')} is missing {sorted(missing)}"
+    assert alert["tier"] in {"SAFE", "APPROVAL", "FORBIDDEN"}, alert["tier"]
+print(f"alerts: {len(alerts)}" + (f" · rules: {sorted({a['rule'] for a in alerts})}" if alerts else " (silent)"))
+PROBE
+}
+check "P5 monitor — the alert inbox answers, and every alert carries its tier" alerts_probe
+
+docs_probe() {
+# Spec 5/6's bars, as assertions rather than as prose about prose. These are cheap and they fail
+# for the right reasons: a missing runbook, a tier list that lost a line, a cost table without the
+# providers, or a troubleshooting section that dropped one of the five named failures.
+uv run python - <<'PROBE' || return 1
+from pathlib import Path
+
+# Case-insensitive for the same reason a spell-check is: the bar is about content, not capitalisation.
+agent = Path("AGENT.md").read_text(encoding="utf-8")
+setup = Path("USER_SETUP.md").read_text(encoding="utf-8")
+agent_lower, setup_lower = agent.lower(), setup.lower()
+
+lines = len(agent.splitlines())
+assert lines <= 170, f"AGENT.md is {lines} lines; brief 5 asks for ~150"
+for needle in (
+    "Role and persona", "Always do", "Ask first", "Never do",
+    "429", "schema", "Quota burn", "keep-rate", "Eval baseline drop",
+    "SYMPTOM", "EVIDENCE", "ATTEMPTED", "PROPOSED", "REVERSAL",
+    "Rollback rule", "one command",
+):
+    assert needle.lower() in agent_lower, f"AGENT.md is missing {needle!r}"
+print(f"AGENT.md: {lines} lines, 5 runbooks, 3 tiers, escalation + rollback present")
+
+# The human's checklist: every bar item from brief 6 must be findable.
+for needle in (
+    "Where to create it", "Free tier", "Verify command",
+    "Expected wait", "cron", "workflow_dispatch",
+    "Cost at expected volume", "would trigger a paid tier",
+    "Troubleshooting", "wrong region", "OAuth expiry", "quota is zero",
+    "Postgres", "key is rejected",
+):
+    assert needle.lower() in setup_lower, f"USER_SETUP.md is missing {needle!r}"
+providers = ("Gemini", "Groq", "Cerebras", "Ollama", "eBay", "GitHub", "Best Buy", "Serper",
+             "Product Hunt", "Walmart", "SearchAPI")
+missing = [name for name in providers if name not in setup]
+assert not missing, f"the cost/key tables are missing {missing}"
+print(f"USER_SETUP.md: key table + cost table for {len(providers)} providers, 5 failure modes")
+PROBE
+}
+check "P5 documents — AGENT.md and USER_SETUP.md meet the brief's bars" docs_probe
+
 # --- summary -----------------------------------------------------------------
 header "Summary"
 if [ "$failures" -eq 0 ]; then

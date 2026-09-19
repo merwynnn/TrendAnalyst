@@ -212,7 +212,24 @@ def run_decide(
             f"{mining.summary()} | {scoring.summary()} | weights {weights.version}"
             + (" | DRY RUN: nothing written" if dry_run else "")
         )
-        if not dry_run:
+        if dry_run:
+            # A dry run still creates its run row (start_run mints the id the report quotes), so it
+            # must also *close* it. Leaving it open made health report a live run for a night that
+            # had ended, and left a row a future resume could mistake for real work.
+            # `aborted` rather than `ok`: nothing was written, and readers that select finished work
+            # (the ranked table, the viewer's default run) must not pick a rehearsal as a result.
+            finish_run(
+                session,
+                str(run_id),
+                status="aborted",
+                layer_status={
+                    "L1": {"status": "ok", **mining.as_dict()},
+                    "L3": {"status": status, **scoring.as_dict()},
+                },
+                notes=f"{ledger_note} | DRY RUN closed as aborted: no scores, no snapshots",
+            )
+            session.commit()
+        else:
             finish_run(
                 session,
                 str(run_id),

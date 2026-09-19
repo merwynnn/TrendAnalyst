@@ -1,87 +1,169 @@
-# ---------------------------------------------------------------------------
-# Trend Analyst — golden eval cases (spec §8, build brief P2).
-#
-# Seeded from REAL pipeline output on 2026-09-19: 10 cases
-# (6 keep, 4 drop, 0 fad). Regenerate with
-#       uv run python -m scripts.seed_evals --count 10
-#
-# READ THIS BEFORE TRUSTING A LABEL: these are BASELINE expectations, not verdicts.
-#   * expected_keep comes from a provisional MGS threshold (52.88, the
-#     median of the seeded set), not from a human judgement. The P3 Judge gate supplies real
-#     judgements; when it disagrees with a label here, the label is what is wrong.
-#   * score_band is ±5.0 points around the observed MGS, so it catches a broken formula, not
-#     a better one.
-#   * Each case keeps its provenance in `notes` (the run it came from) and its evidence in
-#     input_signals, so any label can be re-derived and argued with.
-#
-# 10 cases in P2, 50 by P5. The runner (evals/run_evals.py) lands in P5.
-# ---------------------------------------------------------------------------
 version: 1
-seeded_at: "2026-09-19T15:34:10.828000+00:00"
+seeded_at: '2026-09-19T18:39:40.171178+00:00'
 cases:
-- id: p2-01-electronics_accessories-replies-to-any-speaker
-  category: electronics_accessories
-  phrase: replies to any speaker
+- id: p2-01-baby_kids-fidget-toy
+  category: baby_kids
+  phrase: fidget toy
   input_signals:
   - source: arctic_shift
-    ts: '2026-09-19 13:22:00+02:00'
+    ts: '2026-09-19 15:04:35+02:00'
     value: 1.0
-    text: I made an integration tuned for running Assist on a local LLM in 8 GB VRAM, featuring ~10 ms
-      shortcuts, timers, follow-ups, memory and more plus a way to send Assist replies to ANY speaker
-      (also Googl
+    text: 'My very first design: HexWand, a print-in-place gravity screw fidget toy'
   expected_keep: false
   expected_fad_label: trend
   score_band:
-    min: 47.88
-    max: 57.88
-  baseline_score: 52.88
+    min: 47.66
+    max: 57.66
+  baseline_score: 52.66
   weights_version: v1
-  notes: seeded from run 9fc33028-57d7-4f81-84af-e54c8bc5ac87 on 2026-09-19; 1 mentions; observed MGS
-    52.88; expected_keep from the provisional P2 rule (threshold 53.93, the median of the seeded set;
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    52.66; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
     the P3 Judge replaces this judgement)
-- id: p2-02-home_improvement-hottest-insulation
+- id: p2-02-electronics_accessories-mickey-mouse
+  category: electronics_accessories
+  phrase: mickey mouse
+  input_signals: []
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 55.75
+    max: 65.75
+  baseline_score: 60.75
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    60.75; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-03-home_improvement-hottest-insulation
   category: home_improvement
   phrase: hottest insulation
   input_signals: []
   expected_keep: true
   expected_fad_label: trend
   score_band:
-    min: 48.93
-    max: 58.93
-  baseline_score: 53.93
+    min: 52.93
+    max: 62.93
+  baseline_score: 57.93
   weights_version: v1
-  notes: seeded from run 9fc33028-57d7-4f81-84af-e54c8bc5ac87 on 2026-09-19; 2 mentions; observed MGS
-    53.93; expected_keep from the provisional P2 rule (threshold 53.93, the median of the seeded set;
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 2 mentions; observed MGS
+    57.93; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
     the P3 Judge replaces this judgement)
-- id: p2-03-kitchen_dining-cups-a-larger-mug
-  category: kitchen_dining
-  phrase: cups a larger mug
-  input_signals: []
-  expected_keep: false
-  expected_fad_label: trend
-  score_band:
-    min: 47.94
-    max: 57.94
-  baseline_score: 52.94
-  weights_version: v1
-  notes: seeded from run 0d470204-a1ea-4ea8-b2dc-0f65127f039c on 2026-09-19; 1 mentions; observed MGS
-    52.94; expected_keep from the provisional P2 rule (threshold 53.93, the median of the seeded set;
-    the P3 Judge replaces this judgement)
-- id: p2-04-tools_diy-blade-circ-saw
-  category: tools_diy
-  phrase: blade circ saw
+- id: p2-04-home_office-desk-mat
+  category: home_office
+  phrase: desk mat
   input_signals: []
   expected_keep: true
   expected_fad_label: trend
   score_band:
-    min: 49.62
-    max: 59.62
-  baseline_score: 54.62
+    min: 49.18
+    max: 59.18
+  baseline_score: 54.18
   weights_version: v1
-  notes: seeded from run 0d470204-a1ea-4ea8-b2dc-0f65127f039c on 2026-09-19; 1 mentions; observed MGS
-    54.62; expected_keep from the provisional P2 rule (threshold 53.93, the median of the seeded set;
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    54.18; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
     the P3 Judge replaces this judgement)
-- id: p2-05-home_improvement-hottest-insulation-is-important
+- id: p2-05-kitchen_dining-espresso-machine
+  category: kitchen_dining
+  phrase: espresso machine
+  input_signals: []
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 51.01
+    max: 61.01
+  baseline_score: 56.01
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 4 mentions; observed MGS
+    56.01; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-06-music_audio-pick-up-the-defective
+  category: music_audio
+  phrase: pick up the defective
+  input_signals: []
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 57.77
+    max: 67.77
+  baseline_score: 62.77
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    62.77; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-07-outdoor_garden-greenhouse-plastic
+  category: outdoor_garden
+  phrase: greenhouse plastic
+  input_signals: []
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 49.14
+    max: 59.14
+  baseline_score: 54.14
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    54.14; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-08-pets-corbel-with-brush
+  category: pets
+  phrase: corbel with brush
+  input_signals:
+  - source: arctic_shift
+    ts: '2026-09-19 18:52:38+02:00'
+    value: 1.0
+    text: painting corbel with brush..
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 47.81
+    max: 57.81
+  baseline_score: 52.81
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    52.81; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-09-tools_diy-filament-whatever
+  category: tools_diy
+  phrase: filament whatever
+  input_signals: []
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 59.06
+    max: 69.06
+  baseline_score: 64.06
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    64.06; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-10-baby_kids-estate-puzzle
+  category: baby_kids
+  phrase: estate puzzle
+  input_signals: []
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 47.06
+    max: 57.06
+  baseline_score: 52.06
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    52.06; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-11-electronics_accessories-mouse-but-i-m
+  category: electronics_accessories
+  phrase: mouse but i m
+  input_signals: []
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 55.75
+    max: 65.75
+  baseline_score: 60.75
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    60.75; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-12-home_improvement-hottest-insulation-is-important
   category: home_improvement
   phrase: hottest insulation is important
   input_signals: []
@@ -93,37 +175,135 @@ cases:
   baseline_score: 53.93
   weights_version: v1
   notes: seeded from run 0d470204-a1ea-4ea8-b2dc-0f65127f039c on 2026-09-19; 2 mentions; observed MGS
-    53.93; expected_keep from the provisional P2 rule (threshold 53.93, the median of the seeded set;
+    53.93; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
     the P3 Judge replaces this judgement)
-- id: p2-06-kitchen_dining-larger-mug
-  category: kitchen_dining
-  phrase: larger mug
-  input_signals: []
-  expected_keep: false
-  expected_fad_label: trend
-  score_band:
-    min: 47.94
-    max: 57.94
-  baseline_score: 52.94
-  weights_version: v1
-  notes: seeded from run 9fc33028-57d7-4f81-84af-e54c8bc5ac87 on 2026-09-19; 1 mentions; observed MGS
-    52.94; expected_keep from the provisional P2 rule (threshold 53.93, the median of the seeded set;
-    the P3 Judge replaces this judgement)
-- id: p2-07-tools_diy-circ-saw
-  category: tools_diy
-  phrase: circ saw
+- id: p2-13-home_office-illustrated-desk
+  category: home_office
+  phrase: illustrated desk
   input_signals: []
   expected_keep: true
   expected_fad_label: trend
   score_band:
-    min: 49.62
-    max: 59.62
-  baseline_score: 54.62
+    min: 49.18
+    max: 59.18
+  baseline_score: 54.18
   weights_version: v1
-  notes: seeded from run 9fc33028-57d7-4f81-84af-e54c8bc5ac87 on 2026-09-19; 1 mentions; observed MGS
-    54.62; expected_keep from the provisional P2 rule (threshold 53.93, the median of the seeded set;
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    54.18; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
     the P3 Judge replaces this judgement)
-- id: p2-08-home_improvement-insulation-is-important
+- id: p2-14-kitchen_dining-happy-mug
+  category: kitchen_dining
+  phrase: happy mug
+  input_signals:
+  - source: arctic_shift
+    ts: '2026-09-19 15:38:11+02:00'
+    value: 1.0
+    text: 'Happy Mug Bigfoot: tipping and quakers in bag two, support wouldn''t look at the photo/just
+      doesn’t care'
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 49.26
+    max: 59.26
+  baseline_score: 54.26
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    54.26; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-15-music_audio-pick-and-give
+  category: music_audio
+  phrase: pick and give
+  input_signals: []
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 50.48
+    max: 60.48
+  baseline_score: 55.48
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    55.48; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-16-outdoor_garden-leftover-greenhouse
+  category: outdoor_garden
+  phrase: leftover greenhouse
+  input_signals: []
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 49.14
+    max: 59.14
+  baseline_score: 54.14
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    54.14; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-17-pets-brush-every-three
+  category: pets
+  phrase: brush every three
+  input_signals:
+  - source: arctic_shift
+    ts: '2026-09-19 10:20:42+02:00'
+    value: 1.0
+    text: Shedding season, cutting fur off the roller brush every three days, wondering if any anti-tangle
+      design actually holds up
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 47.21
+    max: 57.21
+  baseline_score: 52.21
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    52.21; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-18-tools_diy-spaghetti-filament
+  category: tools_diy
+  phrase: spaghetti filament
+  input_signals: []
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 59.06
+    max: 69.06
+  baseline_score: 64.06
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    64.06; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-19-baby_kids-puzzle-and-i-d
+  category: baby_kids
+  phrase: puzzle and i d
+  input_signals: []
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 47.06
+    max: 57.06
+  baseline_score: 52.06
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    52.06; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-20-electronics_accessories-hub-for-small
+  category: electronics_accessories
+  phrase: hub for small
+  input_signals:
+  - source: arctic_shift
+    ts: '2026-09-19 06:40:42+02:00'
+    value: 1.0
+    text: is adopting hubspot service hub for small business operations worth it?
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 48.88
+    max: 58.88
+  baseline_score: 53.88
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    53.88; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-21-home_improvement-insulation-is-important
   category: home_improvement
   phrase: insulation is important
   input_signals: []
@@ -135,9 +315,231 @@ cases:
   baseline_score: 53.93
   weights_version: v1
   notes: seeded from run 0d470204-a1ea-4ea8-b2dc-0f65127f039c on 2026-09-19; 2 mentions; observed MGS
-    53.93; expected_keep from the provisional P2 rule (threshold 53.93, the median of the seeded set;
+    53.93; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
     the P3 Judge replaces this judgement)
-- id: p2-09-kitchen_dining-larger-mug-means
+- id: p2-22-kitchen_dining-mug-bigfoot
+  category: kitchen_dining
+  phrase: mug bigfoot
+  input_signals:
+  - source: arctic_shift
+    ts: '2026-09-19 15:38:11+02:00'
+    value: 1.0
+    text: 'Happy Mug Bigfoot: tipping and quakers in bag two, support wouldn''t look at the photo/just
+      doesn’t care'
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 49.26
+    max: 59.26
+  baseline_score: 54.26
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    54.26; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-23-music_audio-time-to-pick
+  category: music_audio
+  phrase: time to pick
+  input_signals: []
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 50.48
+    max: 60.48
+  baseline_score: 55.48
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    55.48; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-24-outdoor_garden-little-planter
+  category: outdoor_garden
+  phrase: little planter
+  input_signals: []
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 49.14
+    max: 59.14
+  baseline_score: 54.14
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    54.14; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-25-pets-brush-works
+  category: pets
+  phrase: brush works
+  input_signals: []
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 47.21
+    max: 57.21
+  baseline_score: 52.21
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    52.21; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-26-tools_diy-16-bolt
+  category: tools_diy
+  phrase: 16 bolt
+  input_signals: []
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 53.31
+    max: 63.31
+  baseline_score: 58.31
+  weights_version: v1
+  notes: 'seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    58.31; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement) | re-labelled to drop on 2026-09-19: judge verdict 2026-09-19
+    (gemini-3.5-flash-lite, conf 0.30): ''16 bolt'' is a fragmented ''5/16 bolt'', not a standalone product
+    gap; the phrase-quality threshold over-keeps fragments'
+- id: p2-27-electronics_accessories-screen-protector
+  category: electronics_accessories
+  phrase: screen protector
+  input_signals:
+  - source: arctic_shift
+    ts: '2026-09-19 08:27:16+02:00'
+    value: 1.0
+    text: Best iPhone 18 Pro Max screen protector that will actually last?
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 48.88
+    max: 58.88
+  baseline_score: 53.88
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    53.88; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-28-home_improvement-ladder-dead
+  category: home_improvement
+  phrase: ladder dead
+  input_signals:
+  - source: arctic_shift
+    ts: '2026-09-19 16:37:00+02:00'
+    value: 1.0
+    text: Is this ladder dead or could I sand finish and use it?
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 47.59
+    max: 57.59
+  baseline_score: 52.59
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    52.59; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-29-kitchen_dining-cups-a-larger-mug
+  category: kitchen_dining
+  phrase: cups a larger mug
+  input_signals: []
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 47.94
+    max: 57.94
+  baseline_score: 52.94
+  weights_version: v1
+  notes: seeded from run 0d470204-a1ea-4ea8-b2dc-0f65127f039c on 2026-09-19; 1 mentions; observed MGS
+    52.94; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-30-music_audio-causing-the-strings
+  category: music_audio
+  phrase: causing the strings
+  input_signals: []
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 46.1
+    max: 56.1
+  baseline_score: 51.1
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    51.10; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-31-outdoor_garden-work-with-a-greenhouse
+  category: outdoor_garden
+  phrase: work with a greenhouse
+  input_signals: []
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 49.14
+    max: 59.14
+  baseline_score: 54.14
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    54.14; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-32-pets-roller-brush
+  category: pets
+  phrase: roller brush
+  input_signals:
+  - source: arctic_shift
+    ts: '2026-09-19 10:20:42+02:00'
+    value: 1.0
+    text: Shedding season, cutting fur off the roller brush every three days, wondering if any anti-tangle
+      design actually holds up
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 47.21
+    max: 57.21
+  baseline_score: 52.21
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    52.21; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-33-tools_diy-bolt-which-vendors
+  category: tools_diy
+  phrase: bolt which vendors
+  input_signals: []
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 53.31
+    max: 63.31
+  baseline_score: 58.31
+  weights_version: v1
+  notes: 'seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    58.31; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement) | re-labelled to drop on 2026-09-19: judge verdict 2026-09-19
+    (gemini-3.5-flash-lite, conf 0.95): ''bolt which vendors'' is a sentence fragment with no product
+    identity'
+- id: p2-34-electronics_accessories-service-hub
+  category: electronics_accessories
+  phrase: service hub
+  input_signals:
+  - source: arctic_shift
+    ts: '2026-09-19 06:40:42+02:00'
+    value: 1.0
+    text: is adopting hubspot service hub for small business operations worth it?
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 48.88
+    max: 58.88
+  baseline_score: 53.88
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    53.88; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-35-home_improvement-drain-and-a-single
+  category: home_improvement
+  phrase: drain and a single
+  input_signals: []
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 46.99
+    max: 56.99
+  baseline_score: 51.99
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    51.99; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-36-kitchen_dining-larger-mug-means
   category: kitchen_dining
   phrase: larger mug means
   input_signals: []
@@ -149,19 +551,215 @@ cases:
   baseline_score: 52.94
   weights_version: v1
   notes: seeded from run 0d470204-a1ea-4ea8-b2dc-0f65127f039c on 2026-09-19; 1 mentions; observed MGS
-    52.94; expected_keep from the provisional P2 rule (threshold 53.93, the median of the seeded set;
+    52.94; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
     the P3 Judge replaces this judgement)
-- id: p2-10-tools_diy-circ-saw-it-still
+- id: p2-37-music_audio-flower-do-i-pick
+  category: music_audio
+  phrase: flower do i pick
+  input_signals: []
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 46.1
+    max: 56.1
+  baseline_score: 51.1
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    51.10; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-38-outdoor_garden-planter-in-my-backyard
+  category: outdoor_garden
+  phrase: planter in my backyard
+  input_signals: []
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 48.54
+    max: 58.54
+  baseline_score: 53.54
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    53.54; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-39-pets-scissors-brush
+  category: pets
+  phrase: scissors brush
+  input_signals: []
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 47.21
+    max: 57.21
+  baseline_score: 52.21
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    52.21; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-40-tools_diy-chisel-storage
   category: tools_diy
-  phrase: circ saw it still
+  phrase: chisel storage
+  input_signals:
+  - source: arctic_shift
+    ts: '2026-09-19 19:09:17+02:00'
+    value: 1.0
+    text: Need your best chisel storage ideas
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 53.31
+    max: 63.31
+  baseline_score: 58.31
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    58.31; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-41-electronics_accessories-file-for-this-mouse
+  category: electronics_accessories
+  phrase: file for this mouse
+  input_signals: []
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 44.75
+    max: 54.75
+  baseline_score: 49.75
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    49.75; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-42-home_improvement-keeping-a-drain
+  category: home_improvement
+  phrase: keeping a drain
+  input_signals: []
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 46.99
+    max: 56.99
+  baseline_score: 51.99
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    51.99; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-43-kitchen_dining-larger-mug
+  category: kitchen_dining
+  phrase: larger mug
+  input_signals: []
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 47.52
+    max: 57.52
+  baseline_score: 52.52
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    52.52; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-44-music_audio-strings-and-bits
+  category: music_audio
+  phrase: strings and bits
+  input_signals: []
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 46.1
+    max: 56.1
+  baseline_score: 51.1
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    51.10; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-45-outdoor_garden-sprouted-in-my-planter
+  category: outdoor_garden
+  phrase: sprouted in my planter
+  input_signals: []
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 48.54
+    max: 58.54
+  baseline_score: 53.54
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    53.54; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-46-tools_diy-filament-thanks
+  category: tools_diy
+  phrase: filament thanks
   input_signals: []
   expected_keep: true
   expected_fad_label: trend
   score_band:
-    min: 49.62
-    max: 59.62
-  baseline_score: 54.62
+    min: 53.31
+    max: 63.31
+  baseline_score: 58.31
   weights_version: v1
-  notes: seeded from run 0d470204-a1ea-4ea8-b2dc-0f65127f039c on 2026-09-19; 1 mentions; observed MGS
-    54.62; expected_keep from the provisional P2 rule (threshold 53.93, the median of the seeded set;
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    58.31; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-47-electronics_accessories-m720-mouse
+  category: electronics_accessories
+  phrase: m720 mouse
+  input_signals: []
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 44.75
+    max: 54.75
+  baseline_score: 49.75
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    49.75; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-48-kitchen_dining-larger-thermos
+  category: kitchen_dining
+  phrase: larger thermos
+  input_signals: []
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 47.52
+    max: 57.52
+  baseline_score: 52.52
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    52.52; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-49-music_audio-decided-to-pick
+  category: music_audio
+  phrase: decided to pick
+  input_signals:
+  - source: arctic_shift
+    ts: '2026-09-19 19:14:54+02:00'
+    value: 1.0
+    text: I found these jars at Ross yesterday for $6.99 for 6. Bought two packs. Decided to pick them
+      up and put my beans in them so I'm not tainting the whole batch on opening. Also labeled them on
+      top as wel
+  expected_keep: false
+  expected_fad_label: trend
+  score_band:
+    min: 45.5
+    max: 55.5
+  baseline_score: 50.5
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    50.50; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
+    the P3 Judge replaces this judgement)
+- id: p2-50-tools_diy-need-your-best-chisel
+  category: tools_diy
+  phrase: need your best chisel
+  input_signals:
+  - source: arctic_shift
+    ts: '2026-09-19 19:09:17+02:00'
+    value: 1.0
+    text: Need your best chisel storage ideas
+  expected_keep: true
+  expected_fad_label: trend
+  score_band:
+    min: 53.31
+    max: 63.31
+  baseline_score: 58.31
+  weights_version: v1
+  notes: seeded from run 7e389a8e-8559-47b7-8f5b-c3548a21de3f on 2026-09-19; 1 mentions; observed MGS
+    58.31; expected_keep from the provisional P2 rule (threshold 53.88, the median of the seeded set;
     the P3 Judge replaces this judgement)

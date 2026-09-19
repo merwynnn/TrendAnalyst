@@ -1,0 +1,96 @@
+name: nightly
+
+# The scheduled run: every night at 03:07 UTC. Minute 7, not 0 — GitHub's scheduled workflows queue
+# hardest on the hour, and a job that starts 40 minutes late on a busy night is harder to reason
+# about than a schedule nobody else wants.
+on:
+  schedule:
+    - cron: "7 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Replay fixtures instead of collecting (writes nothing)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The deterministic nightly: a real Postgres with pgvector, the committed migrations, the recorded
+  # fixtures, then every layer and the ledger reconciliation. No provider key is used, so this job
+  # cannot spend money and cannot be flaky for reasons outside the repository. It answers one
+  # question every night: "does the whole pipeline still run, end to end, on real recorded data?"
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: ta
+          POSTGRES_PASSWORD: ta_ci_password
+          POSTGRES_DB: trend_analyst
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ta -d trend_analyst"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      TA_ENV: dev
+      # The environment layer carries the DSN when there is no secrets file (CI has none) — the same
+      # trick ci.yml uses. 127.0.0.1, never localhost: the IPv6 resolution issue that costs 130 s on
+      # Windows slows CI down in exactly the same way.
+      TA_DB__URL: postgresql+psycopg://ta:ta_ci_password@127.0.0.1:5432/trend_analyst
+      UV_PYTHON_DOWNLOADS: never
+      UV_NO_MANAGED_PYTHON: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install (system interpreter, no downloads)
+        run: uv sync --frozen
+
+      - name: Schema
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
+
+      - name: Every layer on recorded fixtures, then reconcile the ledger
+        run: uv run python -m scripts.nightly --offline --dry-run --json | tee nightly.json
+
+      - name: The ledger must balance to zero unexplained spend
+        run: |
+          uv run python -c "
+          import json, sys
+          report = json.load(open('nightly.json'))
+          ledger = report.get('reconciliation') or {}
+          print(ledger.get('summary', '(no summary)'))
+          if ledger.get('unexplained'):
+              sys.exit(f'UNEXPLAINED SPEND: {ledger[\"unexplained\"]}')
+          if not ledger.get('balanced'):
+              sys.exit('the ledger did not balance')
+          "
+
+      - name: Golden cases
+        run: uv run python -m evals.run_evals --json > evals.json; cat evals.json
+
+      - name: Alert inbox (must be silent on a healthy database)
+        run: uv run python -m trend_analyst.monitor.alerts
+
+      - name: TTL — what would expire tonight
+        run: uv run python -m scripts.ttl_job --dry-run
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-report
+          path: |
+            nightly.json
+            evals.json
+
+  # What this workflow deliberately does NOT do: run the live sources or the LLM gates. Those need
+  # provider keys (a paid tier for volume) and they write to a database that is not a CI artifact.
+  # The live nightly is the local cron entry documented in USER_SETUP.md §5.

@@ -45,7 +45,7 @@ from trend_analyst.pipeline.orchestrator import (
     _limits_factory,
     run_l0,
 )
-from trend_analyst.pipeline.state import start_run
+from trend_analyst.pipeline.state import finish_run, start_run
 from trend_analyst.sources.registry import default_registry_path, load_registry
 from trend_analyst.store.db import (
     DatabaseNotConfiguredError,
@@ -158,17 +158,11 @@ def run_nightly(
     use stubs; in a live run the caller passes the real provider transport.
     """
     report = NightlyReport(started_at=as_of, offline=offline, dry_run=dry_run)
-    if offline and fixtures_dir is not None and not source_ids:
-        # Offline means "replay what was recorded": a source without a fixture cannot be replayed,
-        # and asking for it would fail with a fixture miss. What is left out is named, because a
-        # silently narrowed run is exactly the kind of thing that later reads as full coverage.
-        replayable = _offline_sources(fixtures_dir, registry)
-        source_ids = replayable
-        enabled = [entry.id for entry in registry.sources if entry.enabled]
-        report.notes.append(
-            f"offline: replaying {len(replayable)} recorded source(s) of {len(enabled)} enabled; "
-            f"not recorded: {', '.join(sorted(set(enabled) - set(replayable)))}"
-        )
+    source_ids, offline_note = _resolve_offline_sources(
+        registry=registry, offline=offline, fixtures_dir=fixtures_dir, source_ids=source_ids
+    )
+    if offline_note:
+        report.notes.append(offline_note)
 
     # --- L0: collect ---------------------------------------------------------
     l0 = run_l0(
@@ -231,6 +225,16 @@ def run_nightly(
                 select(Candidate).where(Candidate.status == "kept").order_by(Candidate.id)
             ).scalars().all()
         )
+        if dry_run:
+            # Close the run this stage opened: a dry run writes nothing, but a run row left open
+            # makes health claim the system is mid-run (and a resume could pick it up).
+            finish_run(
+                session,
+                str(handle),
+                status="aborted",
+                notes="DRY RUN: the judge/writer stage wrote nothing",
+            )
+            session.commit()
         report.writer_status = "empty"
         if kept and writer_sender is not None:
             written = write_briefs(
@@ -299,6 +303,35 @@ def _offline_sources(fixtures_dir: Path, registry: Any) -> list[str]:
         if fixture_path(fixtures_dir, entry.id).is_file():
             out.append(entry.id)
     return out
+
+
+def _resolve_offline_sources(
+    *,
+    registry: Any,
+    offline: bool,
+    fixtures_dir: Path | None,
+    source_ids: Sequence[str] | None,
+) -> tuple[Sequence[str] | None, str]:
+    """Narrow an offline run to the sources that were actually recorded, and say what was left out.
+
+    Offline means "replay what was recorded": a source with no fixture cannot be replayed, and
+    asking for it would fail with a fixture miss. What is dropped is named, because a silently
+    narrowed run is exactly the kind of thing that later reads as full coverage.
+    """
+    if not (offline and fixtures_dir is not None and not source_ids):
+        return source_ids, ""
+    replayable = _offline_sources(fixtures_dir, registry)
+    enabled = [entry.id for entry in registry.sources if entry.enabled]
+    missing = ", ".join(sorted(set(enabled) - set(replayable)))
+    return replayable, (
+        f"offline: replaying {len(replayable)} recorded source(s) of {len(enabled)} enabled; "
+        f"not recorded: {missing}"
+    )
+
+
+def _run_ttl(session: Session, *, as_of: datetime, dry_run: bool) -> Any:
+    """Expire what the TTL policy allows, and hand back the report for the nightly summary."""
+    return expire(session, now=as_of, dry_run=dry_run)
 
 
 def _start_run(session: Session, trigger: str) -> uuid.UUID:

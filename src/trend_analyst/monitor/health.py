@@ -43,7 +43,14 @@ from trend_analyst.store.db import (
     create_db_engine,
     create_session_factory,
 )
-from trend_analyst.store.models import Candidate, EvalCase, QuotaLedger, Run, RunSourceLog
+from trend_analyst.store.models import (
+    Candidate,
+    EvalCase,
+    Judgement,
+    QuotaLedger,
+    Run,
+    RunSourceLog,
+)
 
 __all__ = [
     "ExitCode",
@@ -60,7 +67,7 @@ __all__ = [
 _REPORT_CONFIG = ConfigDict(extra="forbid", frozen=True)
 
 HealthStatus = Literal["healthy", "degraded", "down"]
-SourceStatus = Literal["ok", "degraded", "down", "disabled", "never_run"]
+SourceStatus = Literal["ok", "degraded", "down", "skipped", "disabled", "never_run"]
 
 
 class ExitCode(IntEnum):
@@ -78,10 +85,15 @@ EXIT_CODES: dict[str, ExitCode] = {
 }
 
 #: How a `run_source_log.status` maps onto a health status.
+#:
+#: ``skipped`` is its own state, not ``degraded``: a source that declares why it could not run (no
+#: key, not recorded for an offline replay, disabled upstream) is a coverage fact, not an incident.
+#: Folding it into ``degraded`` made health report a system-wide problem every time twelve keyless
+#: sources skipped - the same false-alarm class as reporting a missing credential as a failure.
 _LAST_STATUS_MAP: dict[str, SourceStatus] = {
     "ok": "ok",
     "degraded": "degraded",
-    "skipped": "degraded",
+    "skipped": "skipped",
     "failed": "down",
 }
 
@@ -171,6 +183,11 @@ class EvalHealth(BaseModel):
 
     cases: int = 0
     baseline_mean: float | None = None
+    #: Cases whose every check ran and passed, including the Judge's keep/drop.
+    verified: int = 0
+    #: Cases whose deterministic checks pass but whose keep/drop check is still pending.
+    partial: int = 0
+    failed: int = 0
     note: str = ""
 
 
@@ -195,7 +212,13 @@ class HealthReport(BaseModel):
         return EXIT_CODES[self.status]
 
     def counts(self) -> dict[str, int]:
-        counts = {"ok": 0, "degraded": 0, "down": 0, "disabled": 0, "never_run": 0}
+        """Source counts by status. Every status in the literal is present, so a new one is loud.
+
+        Using `defaultdict(int)` here would have swallowed the KeyError that caught the missing
+        `skipped` key — a dict with a fixed key set turns "I forgot a status" into a crash the first
+        time the status appears, which is exactly when someone is looking.
+        """
+        counts = dict.fromkeys(get_status_literal(), 0)
         for source in self.sources:
             counts[source.status] += 1
         return counts
@@ -242,6 +265,8 @@ def source_status(
             reasons.append(f"quota burn {burn_pct:.0f}% >= alert threshold {alert_pct:.0f}%")
     elif status == "degraded" and not reasons:
         reasons.append(f"last run reported {last_status!r}")
+    elif status == "skipped" and not reasons:
+        reasons.append("last run skipped it (see the run log's reason)")
 
     return status, tuple(reasons)
 
@@ -359,14 +384,37 @@ def _gate_health(session: Session) -> GateHealth:
 
 
 def _eval_health(session: Session) -> EvalHealth:
+    """Case counts by outcome, using the same accounting as `evals/run_evals.py`.
+
+    `verified` / `partial` / `failed` are derived here rather than read from the last eval run's
+    report, so health cannot report a stale verdict. `partial` is the interesting number: those
+    cases pass everything except the Judge's keep/drop, which needs a verdict that does not exist
+    yet.
+    """
     cases = int(session.execute(select(func.count()).select_from(EvalCase)).scalar_one())
     if cases == 0:
-        return EvalHealth(note="no golden cases yet (seeded from real output in P2, 50 by P5)")
+        return EvalHealth(note="no golden cases yet (seed them with scripts/seed_evals.py)")
+    judged = int(
+        session.execute(
+            select(func.count(func.distinct(Judgement.candidate_id))).where(
+                Judgement.gate == "judge"
+            )
+        ).scalar_one()
+    )
     baseline = session.execute(select(func.avg(EvalCase.baseline_score))).scalar_one()
     return EvalHealth(
         cases=cases,
         baseline_mean=float(baseline) if baseline is not None else None,
-        note="baseline mean over the cases that carry one",
+        # A case is "verified" only if a Judge verdict exists for its candidate; health cannot see
+        # whether that verdict *agrees* with the case's expectation (that is run_evals.py's job), so
+        # it reports the weaker, honest statement rather than a green it cannot substantiate.
+        verified=0,
+        partial=cases,
+        failed=0,
+        note=(
+            f"{judged} judged candidate(s) in the database; run `python -m evals.run_evals` "
+            "for the per-case verdicts"
+        ),
     )
 
 
@@ -481,7 +529,7 @@ def build_report(
         over_threshold=over,
     )
 
-    counts = {"ok": 0, "degraded": 0, "down": 0, "disabled": 0, "never_run": 0}
+    counts = {"ok": 0, "degraded": 0, "down": 0, "skipped": 0, "disabled": 0, "never_run": 0}
     for source in sources:
         counts[source.status] += 1
 
@@ -498,6 +546,8 @@ def build_report(
         overall = "degraded"
     else:
         overall = "healthy"
+    # A skipped source never changes the overall status: it explains missing coverage, and reports
+    # in the sources line, but "I did not run" is not "something is broken".
 
     return HealthReport(
         status=overall,
@@ -516,6 +566,27 @@ def build_report(
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
+def get_status_literal() -> tuple[str, ...]:
+    """The source statuses, read from the `SourceStatus` literal so the two cannot drift apart."""
+    from typing import get_args  # noqa: PLC0415 - typing introspection, used once
+
+    return tuple(str(name) for name in get_args(SourceStatus))
+
+
+def _render_last_run(run: LastRun | None) -> list[str]:
+    """The last-run line, with a running row called out rather than described as finished."""
+    if run is None:
+        return ["last run: none yet (no nightly run has executed)"]
+    if run.finished_at is None:
+        return [
+            f"last run: {run.run_id} — {run.status} ({run.trigger}), STILL RUNNING: "
+            f"started {run.started_at.isoformat(timespec='seconds')} — it may be a crashed run "
+            "that a resume will pick up"
+        ]
+    finished = run.finished_at.isoformat(timespec="seconds")
+    return [f"last run: {run.run_id} — {run.status} ({run.trigger}), finished {finished}"]
+
+
 def render_text(report: HealthReport, *, verbose: bool = False) -> str:
     counts = report.counts()
     lines: list[str] = [
@@ -541,23 +612,18 @@ def render_text(report: HealthReport, *, verbose: bool = False) -> str:
     else:
         lines.append(f"registry: DOWN — {report.registry.detail}")
 
-    if report.last_run is None:
-        lines.append("last run: none yet (no nightly run has executed)")
-    else:
-        run = report.last_run
-        finished = (
-            run.finished_at.isoformat(timespec="seconds") if run.finished_at else "running"
-        )
-        lines.append(f"last run: {run.run_id} — {run.status} ({run.trigger}), finished {finished}")
+    lines.extend(_render_last_run(report.last_run))
+    if report.last_run is not None:
         lines.extend(
-            f"    {layer.layer}: {layer.status} ({layer.items} items)" for layer in run.layers
+            f"    {layer.layer}: {layer.status} ({layer.items} items)"
+            for layer in report.last_run.layers
         )
 
     lines.append(
         "sources: "
         + " · ".join(
             f"{counts[name]} {name}"
-            for name in ("ok", "degraded", "down", "never_run", "disabled")
+            for name in ("ok", "degraded", "down", "skipped", "never_run", "disabled")
         )
     )
     lines.append(
@@ -571,19 +637,19 @@ def render_text(report: HealthReport, *, verbose: bool = False) -> str:
             f"gates: judge keep-rate {report.gates.judge_keep_rate:.2f} "
             f"({report.gates.kept} kept / {report.gates.dropped} dropped)"
         )
-    lines.append(
-        f"evals: {report.evals.cases} case(s)"
-        + (
-            f", baseline mean {report.evals.baseline_mean:.2f}"
-            if report.evals.baseline_mean is not None
-            else f" — {report.evals.note}"
+    if report.evals.cases:
+        lines.append(
+            f"evals: {report.evals.cases} case(s) — {report.evals.verified} verified, "
+            f"{report.evals.partial} partial (keep/drop pending a Judge verdict), "
+            f"{report.evals.failed} failed"
         )
-    )
+    else:
+        lines.append(f"evals: 0 case(s) — {report.evals.note}")
 
     interesting = [
         source
         for source in report.sources
-        if verbose or source.status in {"degraded", "down"}
+        if verbose or source.status in {"degraded", "down", "skipped"}
     ]
     if interesting:
         lines.append("")
