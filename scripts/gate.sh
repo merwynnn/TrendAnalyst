@@ -82,6 +82,40 @@ PY
 }
 check "config CLI — every layer resolved, secrets redacted" config_cli_probe
 
+# --- registry ------------------------------------------------------------------
+registry_probe() {
+  uv run python - <<'PY'
+import subprocess
+import sys
+
+out = subprocess.run(
+    [sys.executable, "-m", "config.cli", "registry", "--json"],
+    capture_output=True,
+    text=True,
+    check=True,
+)
+import json
+
+data = json.loads(out.stdout)
+summary = data["summary"]
+print(
+    f"{summary['total']} sources ({summary['tier_s']} Tier S, {summary['tier_a']} Tier A) · "
+    f"{summary['enabled']} enabled, {summary['disabled']} disabled"
+)
+print(f"L0 collect: {summary['l0']} · L2 enrich: {summary['l2']}")
+print(f"execution order starts: {', '.join(s['id'] for s in data['sources'][:3])} ...")
+print(f"egress allowlist entries: {sum(len(v) for v in data['allowed_domains'].values())}")
+
+l0 = [s for s in data["sources"] if "L0" in s["layers"]]
+assert all(s["tier"] == "S" for s in l0), "Tier A slipped into L0"
+assert all(s["enabled"] for s in l0), "an L0 source is disabled"
+assert all(not s["enabled"] for s in data["sources"] if s["tier"] == "A"), (
+    "a Tier-A source is enabled without its credential being verified"
+)
+PY
+}
+check "source registry — catalog, execution order, Tier-A never in L0" registry_probe
+
 # --- needs Postgres ----------------------------------------------------------
 if uv run python -c "
 import socket, sys

@@ -16,6 +16,11 @@ uv run python -m config.cli show
 uv run python -m config.cli show --json --env prod          # what prod would run with
 uv run python -m config.cli show --set app.log_level=DEBUG  # CLI layer beats env/YAML
 
+# The source registry: file order IS execution order. Fails loudly on a bad registry.
+uv run python -m config.cli registry
+uv run python -m config.cli registry --json
+uv run python -m config.cli registry --registry /path/to/suspicious.yaml   # validate a file
+
 # What was I doing / what is left
 beans list --json --ready
 beans show <bean-id>

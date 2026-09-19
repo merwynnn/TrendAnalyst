@@ -4,24 +4,319 @@
 # Normative semantics, enforced in code by trend_analyst.sources.registry:
 #
 #   * FILE ORDER IS EXECUTION ORDER. The orchestrator iterates enabled sources in
-#     the order they appear here — the catalog below is kept in the appendix-A
-#     ranking order (Tier S first, then Tier A).
-#   * A Tier-A (or any non-Tier-S) source declaring layer L0 is a HARD STARTUP
-#     FAILURE. Tier A spends quota, L0 runs broad and cheap, and the two must
+#     the order they appear here, so this file is kept in the Appendix-A ranking
+#     order: 15 Tier-S sources, then 7 Tier-A sources.
+#   * A Tier-A source declaring layer L0 is a HARD STARTUP FAILURE. L0 runs broad
+#     and cheap; Tier A spends quota and runs in L2 on survivors only. The two must
 #     never mix.
 #   * `enabled: false` removes a source from runs without deleting its module
-#     (spec §4.3 lifecycle: keep the module for 30 days before deleting).
-#   * `budget_per_day` is enforced by a central token bucket per source id, never
-#     by a prompt. On HTTP 429 a plugin MUST back off and record `quota_spend`;
-#     the run continues without that source.
-#   * `domains` is the network egress allowlist for that plugin (spec §10): a
-#     source may only call domains it declares here.
+#     (spec §4.3: keep the module 30 days before deleting).
+#   * `budget_per_day` is enforced by a central token bucket per source id, never by
+#     a prompt. On HTTP 429 a plugin MUST back off and record `quota_spend`; the run
+#     continues without that source.
+#   * `domains` is the network egress allowlist for that plugin (spec §10): a source
+#     may call the declared hosts and nothing else. Matching is exact, plus the
+#     explicit `*.suffix` form — subdomains are NOT implicitly allowed, because an
+#     allowlist that quietly widens is not an allowlist.
 #
-# TODO(P0-T3): the full appendix-A catalog lands here — 15 Tier-S entries (enabled)
-# and 7 Tier-A entries (disabled until their credential exists). An EMPTY registry
-# is a hard error: the loader refuses to start rather than silently scanning nothing.
+# BUDGET DERIVATION (the reason a number is what it is):
+#   Appendix A states most budgets qualitatively ("no key, no stated limit", "~2
+#   req/s", "3000 / 5 min"). Where spec §4.2 gives an explicit number, that number is
+#   used verbatim and marked "spec §4.2". Everywhere else the rule is:
+#     rps     = the polite throttle Appendix A states (a stated ceiling is halved
+#               when the source is large and public);
+#     daily   = sized to what one nightly pass actually needs, deliberately far below
+#               any provider ceiling — a budget is a leash we choose, not a quota we
+#               discovered. It is also the number the health CLI reports burn against.
+#   The per-entry comments record which of the two applies.
+#
+# SECRETS: none. Tier-A sources are `enabled: false` until their credential exists in
+# config/secrets.local.yaml — the build never blocks on an approval (brief §6).
 # ---------------------------------------------------------------------------
 
 version: 1
 
-sources: {}
+sources:
+  # =========================================================================
+  # TIER S — L0 core, keyless, broad and cheap, in pipeline order
+  # =========================================================================
+
+  # Appendix A #1 "Tech launches + critiques", budget "No key, no stated limit".
+  hn_firebase:
+    role: Tech launches and critiques
+    module: trend_analyst.sources.tier_s.hn
+    tier: S
+    layers: [L0]
+    schedule: nightly
+    budget_per_day: 2000   # spec §4.2 verbatim
+    rps: 5                 # spec §4.2 verbatim
+    enabled: true
+    domains: [hacker-news.firebaseio.com, news.ycombinator.com]
+
+  # Appendix A #2 "Reddit pain mining, ~15 subs", polite ~2 req/s. Reddit's own API is
+  # dropped for v1 (approval + commercial contract); Arctic Shift is the keyless archive.
+  arctic_shift:
+    role: Reddit pain mining (~15 subs)
+    module: trend_analyst.sources.tier_s.arctic_shift
+    tier: S
+    layers: [L0]
+    schedule: nightly
+    budget_per_day: 3000   # 15 subs x paging; far under the archive's capacity
+    rps: 2                 # Appendix A: "polite (~2 req/s)"
+    enabled: true
+    domains: [arctic-shift.photon-reddit.com]
+
+  # Appendix A #3 "Live social complaints", "3000 / 5 min" = 10 rps ceiling.
+  bluesky_jetstream:
+    role: Live social complaints
+    module: trend_analyst.sources.tier_s.bluesky
+    tier: S
+    layers: [L0]
+    schedule: nightly
+    budget_per_day: 5000
+    rps: 5                 # half the stated 10 rps ceiling, on purpose
+    enabled: true
+    domains: [public.api.bsky.app, jetstream1.us-east.bsky.network]
+
+  # Appendix A #4 "Absolute demand baseline", "No key, generous".
+  wiki_pageviews:
+    role: Absolute demand baseline
+    module: trend_analyst.sources.tier_s.wiki
+    tier: S
+    layers: [L0]
+    schedule: nightly
+    budget_per_day: 2000   # spec §4.2 verbatim
+    rps: 4                 # spec §4.2 verbatim
+    enabled: true
+    domains: [wikimedia.org]
+
+  # Appendix A #5 "Long-tail intent expansion", weekly, 1-2 s throttle.
+  suggest_autocomplete:
+    role: Long-tail intent expansion (Google + Amazon)
+    module: trend_analyst.sources.tier_s.suggest
+    tier: S
+    layers: [L0]
+    schedule: weekly
+    budget_per_day: 500
+    rps: 0.5               # Appendix A: "1-2 s throttle"
+    enabled: true
+    domains: [suggestqueries.google.com, completion.amazon.com]
+
+  # Appendix A #6 "Micro-SaaS gaps (installs vs rating)", 1 req/s, weekly.
+  wordpress_org:
+    role: Micro-SaaS gaps (installs vs rating)
+    module: trend_analyst.sources.tier_s.wordpress
+    tier: S
+    layers: [L0]
+    schedule: weekly
+    budget_per_day: 1000
+    rps: 1                 # Appendix A: "1 req/s"
+    enabled: true
+    domains: [api.wordpress.org]
+
+  # Appendix A #7 "Game and tool sentiment gaps", ~10 req/s.
+  steam_reviews:
+    role: Game and tool sentiment gaps
+    module: trend_analyst.sources.tier_s.steam
+    tier: S
+    layers: [L0]
+    schedule: nightly
+    budget_per_day: 4000
+    rps: 10                # Appendix A: "~10 req/s"
+    enabled: true
+    domains: [store.steampowered.com, api.steampowered.com]
+
+  # Appendix A #8 "DTC and app-store gaps", 1 req/s, weekly.
+  # Egress: merchant storefronts are unbounded, so the allowlist is the wildcard the
+  # plugin resolves against a curated merchant list (P1 owns that list).
+  shopify_public:
+    role: DTC and app-store gaps
+    module: trend_analyst.sources.tier_s.shopify
+    tier: S
+    layers: [L0]
+    schedule: weekly
+    budget_per_day: 1000
+    rps: 1                 # Appendix A: "1 req/s"
+    enabled: true
+    domains: ["*.myshopify.com"]
+
+  # Appendix A #9 "Social trend cross-check", nightly.
+  mastodon_trends:
+    role: Social trend cross-check
+    module: trend_analyst.sources.tier_s.mastodon
+    tier: S
+    layers: [L0]
+    schedule: nightly
+    budget_per_day: 500
+    rps: 1
+    enabled: true
+    domains: [mastodon.social]
+
+  # Appendix A #10 "Paper-surge tech radar", mailto polite pool, weekly.
+  openalex_arxiv:
+    role: Paper-surge tech radar
+    module: trend_analyst.sources.tier_s.openalex
+    tier: S
+    layers: [L0]
+    schedule: weekly
+    budget_per_day: 2000
+    rps: 5                 # polite pool is ~10 rps; halved
+    enabled: true
+    domains: [api.openalex.org, export.arxiv.org]
+
+  # Appendix A #11 "News-cycle validation", nightly.
+  gdelt_doc:
+    role: News-cycle validation
+    module: trend_analyst.sources.tier_s.gdelt
+    tier: S
+    layers: [L0]
+    schedule: nightly
+    budget_per_day: 500
+    rps: 1
+    enabled: true
+    domains: [api.gdeltproject.org]
+
+  # Appendix A #12 "App demand + ratings", ~20/min = 0.33 rps, weekly.
+  itunes_search:
+    role: App demand and ratings
+    module: trend_analyst.sources.tier_s.itunes
+    tier: S
+    layers: [L0]
+    schedule: weekly
+    budget_per_day: 500
+    rps: 0.33              # Appendix A: "~20/min"
+    enabled: true
+    domains: [itunes.apple.com]
+
+  # Appendix A #13 "Pre-Steam experiments", weekly.
+  itch_io:
+    role: Pre-Steam experiments
+    module: trend_analyst.sources.tier_s.itchio
+    tier: S
+    layers: [L0]
+    schedule: weekly
+    budget_per_day: 200
+    rps: 0.5
+    enabled: true
+    domains: [itch.io]
+
+  # Appendix A #14 "Niche book velocity", "no key low volume", monthly.
+  # SPEC CONFLICT C5: Appendix A says monthly, but the plugin contract (§4.1) offers
+  # only nightly|weekly|hourly|on_demand. Runs weekly (cheap, and the watermark makes
+  # the extra passes nearly free) rather than inventing a fifth schedule value.
+  google_books:
+    role: Niche book velocity
+    module: trend_analyst.sources.tier_s.google_books
+    tier: S
+    layers: [L0]
+    schedule: weekly
+    budget_per_day: 100
+    rps: 0.5
+    enabled: true
+    domains: [www.googleapis.com]
+
+  # Appendix A #15 "Web-wide diffusion counts", monthly — same C5 mapping as above.
+  common_crawl_index:
+    role: Web-wide diffusion counts
+    module: trend_analyst.sources.tier_s.common_crawl
+    tier: S
+    layers: [L0]
+    schedule: weekly
+    budget_per_day: 100
+    rps: 0.2
+    enabled: true
+    domains: [index.commoncrawl.org]
+
+  # =========================================================================
+  # TIER A — L2 enrichment only, on demand, top-K survivors, quota-leashed.
+  # Every one ships disabled until its credential exists in the secrets file.
+  # =========================================================================
+
+  # Appendix A Tier A #1 "Sold-vs-listed ratios", App key, 5,000 / day.
+  # SPEC CONFLICT C2: the §4.2 example shows 1000/day for eBay; Appendix A's catalog
+  # (the normative ranking) says 5,000/day. Appendix A wins.
+  ebay_browse:
+    role: Sold-vs-listed ratios
+    module: trend_analyst.sources.tier_a.ebay
+    tier: A
+    layers: [L2]
+    schedule: on_demand
+    budget_per_day: 5000   # Appendix A verbatim
+    rps: 1                 # spec §4.2 verbatim
+    enabled: false         # needs tier_a.ebay_client_id + ebay_client_secret
+    domains: [api.ebay.com]
+
+  # Appendix A Tier A #2 "Star and fork velocity", PAT in 30 s, 5,000 / hr.
+  github_rest:
+    role: Star and fork velocity
+    module: trend_analyst.sources.tier_a.github
+    tier: A
+    layers: [L2]
+    schedule: on_demand
+    budget_per_day: 2000   # we read a handful of repos per candidate, not 5,000/hr
+    rps: 1
+    enabled: false         # needs tier_a.github_token
+    domains: [api.github.com]
+
+  # Appendix A Tier A #3 "Trending + Also-Viewed electronics", instant key.
+  bestbuy_trending:
+    role: Trending and also-viewed electronics
+    module: trend_analyst.sources.tier_a.bestbuy
+    tier: A
+    layers: [L2]
+    schedule: on_demand
+    budget_per_day: 500
+    rps: 0.5
+    enabled: false         # needs tier_a.bestbuy_api_key
+    domains: [api.bestbuy.com]
+
+  # Appendix A Tier A #4 "Programmable SERP + PAA", 2,500 free, no card.
+  # NOTE: 2,500 is a free-tier TOTAL, not a daily allowance.
+  serper:
+    role: Programmable SERP and People-Also-Ask
+    module: trend_analyst.sources.tier_a.serper
+    tier: A
+    layers: [L2]
+    schedule: on_demand
+    budget_per_day: 100    # spec §4.2 verbatim
+    rps: 0.5               # spec §4.2 verbatim
+    enabled: false         # needs tier_a.serper_api_key
+    domains: [google.serper.dev]
+
+  # Appendix A Tier A #5 "Launch velocity", instant OAuth app.
+  producthunt_graphql:
+    role: Launch velocity
+    module: trend_analyst.sources.tier_a.producthunt
+    tier: A
+    layers: [L2]
+    schedule: on_demand
+    budget_per_day: 200
+    rps: 0.5
+    enabled: false         # needs tier_a.producthunt_token
+    domains: [api.producthunt.com]
+
+  # Appendix A Tier A #6 "Mass-market trending items", account + key upload.
+  walmart_affiliate:
+    role: Mass-market trending items
+    module: trend_analyst.sources.tier_a.walmart
+    tier: A
+    layers: [L2]
+    schedule: on_demand
+    budget_per_day: 500
+    rps: 0.5
+    enabled: false         # needs tier_a.walmart_client_id + walmart_client_secret
+    domains: [developer.api.walmart.com]
+
+  # Appendix A Tier A #7 "Ad-library JSON sampling", 100 free requests.
+  # NOTE: 100 is a free-tier TOTAL, so the daily leash is deliberately tiny — this
+  # source must survive the month, not the week.
+  searchapi:
+    role: Ad-library JSON sampling
+    module: trend_analyst.sources.tier_a.searchapi
+    tier: A
+    layers: [L2]
+    schedule: on_demand
+    budget_per_day: 5
+    rps: 0.5
+    enabled: false         # needs tier_a.searchapi_key
+    domains: [www.searchapi.io]

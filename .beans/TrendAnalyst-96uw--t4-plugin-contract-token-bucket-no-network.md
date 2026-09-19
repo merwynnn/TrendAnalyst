@@ -1,11 +1,11 @@
 ---
 # TrendAnalyst-96uw
 title: T4 — Plugin contract + token bucket (no network)
-status: todo
+status: in-progress
 type: task
 priority: high
 created_at: 2026-09-19T11:42:42Z
-updated_at: 2026-09-19T11:42:43Z
+updated_at: 2026-09-19T12:35:23Z
 parent: TrendAnalyst-l15l
 blocked_by:
     - TrendAnalyst-zai8
