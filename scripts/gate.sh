@@ -116,6 +116,20 @@ PY
 }
 check "source registry — catalog, execution order, Tier-A never in L0" registry_probe
 
+# --- registry → database sync (P0-T6) -----------------------------------------
+if uv run python -c "
+import socket, sys
+s = socket.socket(); s.settimeout(2)
+sys.exit(0 if s.connect_ex(('127.0.0.1', 5432)) == 0 else 1)
+" 2>/dev/null; then
+  check "registry sync — second run is a no-op" uv run python -m scripts.sync_sources
+  check "registry sync — idempotent (dry run reports zero changes)" \
+    uv run python -m scripts.sync_sources --dry-run
+else
+  pending "registry sync" "no Postgres reachable on 127.0.0.1:5432" \
+    uv run python -m scripts.sync_sources
+fi
+
 # --- needs Postgres ----------------------------------------------------------
 if uv run python -c "
 import socket, sys

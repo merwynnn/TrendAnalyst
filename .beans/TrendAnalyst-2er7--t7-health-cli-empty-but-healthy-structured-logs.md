@@ -1,11 +1,11 @@
 ---
 # TrendAnalyst-2er7
 title: T7 — Health CLI (empty-but-healthy) + structured logs
-status: todo
+status: in-progress
 type: task
 priority: high
 created_at: 2026-09-19T11:42:42Z
-updated_at: 2026-09-19T11:42:43Z
+updated_at: 2026-09-19T14:02:20Z
 parent: TrendAnalyst-l15l
 blocked_by:
     - TrendAnalyst-zai8
