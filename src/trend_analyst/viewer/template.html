@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trend Analyst — results</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1e2229; --line: #2a2f38;
+    --text: #e7e9ee; --dim: #9aa3b2; --dim2: #6b7385;
+    --good: #4ade80; --warn: #fbbf24; --bad: #f87171; --accent: #60a5fa; --pending: #a78bfa;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  a { color: var(--accent); }
+  header { padding: 18px 22px; border-bottom: 1px solid var(--line); background: var(--panel);
+           position: sticky; top: 0; z-index: 5; }
+  h1 { margin: 0 0 4px; font-size: 17px; letter-spacing: .2px; }
+  .sub { color: var(--dim); font-size: 12px; }
+  .wrap { padding: 18px 22px 60px; max-width: 1500px; }
+  .cards { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 18px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+          padding: 10px 14px; min-width: 118px; }
+  .card b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+  .card span { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .6px; }
+  section { margin: 0 0 26px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .8px; color: var(--dim);
+       margin: 22px 0 10px; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line);
+           vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 11px; text-transform: uppercase;
+       letter-spacing: .5px; cursor: pointer; user-select: none; white-space: nowrap; }
+  th:hover { color: var(--text); }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: var(--panel2); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 11px;
+          border: 1px solid var(--line); background: var(--panel2); color: var(--dim); }
+  .pill.fad { color: var(--warn); border-color: #4c3d17; }
+  .pill.trend { color: var(--good); border-color: #1b4030; }
+  .pill.evergreen { color: var(--accent); border-color: #1d3457; }
+  .pill.ok { color: var(--good); } .pill.degraded { color: var(--warn); }
+  .pill.failed, .pill.down { color: var(--bad); } .pill.skipped, .pill.never_run { color: var(--dim2); }
+  .bar { height: 6px; background: #262b34; border-radius: 4px; overflow: hidden; width: 74px;
+         display: inline-block; vertical-align: middle; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .detail { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+            padding: 16px; margin: 8px 0 18px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
+  .box { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; }
+  .box h4 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .6px;
+            color: var(--dim); font-weight: 600; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font-family: var(--mono);
+        font-size: 12px; }
+  .kv dt { color: var(--dim); } .kv dd { margin: 0; }
+  .quote { border-left: 2px solid var(--line); padding: 4px 0 4px 9px; margin: 7px 0;
+           color: var(--dim); font-size: 12px; }
+  .quote em { color: var(--text); font-style: normal; }
+  .timeline { display: flex; align-items: flex-end; gap: 1px; height: 34px; margin-top: 6px; }
+  .timeline i { flex: 1; background: var(--accent); opacity: .8; min-height: 1px; border-radius: 1px 1px 0 0; }
+  .label { font-size: 11px; color: var(--dim2); font-family: var(--mono); }
+  .pending { border: 1px dashed #3b3350; background: #1a1626; color: #c3b6ef; padding: 9px 11px;
+             border-radius: 6px; font-size: 12px; }
+  .pending b { color: var(--pending); font-weight: 600; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  input, select { background: var(--panel); border: 1px solid var(--line); color: var(--text);
+                  border-radius: 6px; padding: 6px 9px; font-size: 13px; }
+  input { min-width: 220px; }
+  .note { color: var(--dim); font-size: 12px; margin: 6px 0 0; }
+  .tag { font-family: var(--mono); font-size: 11px; color: var(--dim2); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Trend Analyst — results</h1>
+  <div class="sub">
+    every figure is labelled: <b>stored</b> = read from a score snapshot ·
+    <b>recomputed</b> = derived from the raw lake at build time ·
+    <b>pending</b> = a later phase fills it
+  </div>
+  <div class="sub" id="scope"></div>
+</header>
+<div class="wrap">
+  <div class="cards" id="cards"></div>
+
+  <section>
+    <h2>Ranked candidates</h2>
+    <div class="toolbar">
+      <input id="filter" placeholder="filter phrase / category / source…">
+      <select id="sort">
+        <option value="mgs">sort: MGS</option>
+        <option value="dv">sort: demand velocity</option>
+        <option value="gap">sort: headroom (100−SS)</option>
+        <option value="sp">sort: seller pain</option>
+        <option value="mp">sort: money</option>
+        <option value="fe">sort: feasibility</option>
+        <option value="p90">sort: revenue P90</option>
+        <option value="mentions">sort: mentions</option>
+      </select>
+      <select id="category"><option value="">all categories</option></select>
+      <select id="label">
+        <option value="">all fad labels</option>
+        <option value="trend">trend</option><option value="fad">fad</option>
+        <option value="evergreen">evergreen</option>
+      </select>
+      <span class="note" id="rowcount"></span>
+    </div>
+    <table>
+      <thead><tr>
+        <th class="num" data-k="mgs">MGS</th>
+        <th class="num" data-k="dv">DV</th>
+        <th class="num" data-k="ss">SS</th>
+        <th class="num" data-k="sp">SP</th>
+        <th class="num" data-k="mp">MP</th>
+        <th class="num" data-k="fe">FE</th>
+        <th data-k="fad">fad</th>
+        <th class="num" data-k="p90">$/mo (P10–P50–P90)</th>
+        <th data-k="phrase">phrase</th>
+        <th data-k="category">category</th>
+        <th class="num" data-k="mentions">mentions</th>
+        <th data-k="sources">sources (recomputed)</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </section>
+
+  <div id="detail"></div>
+
+  <section>
+    <h2>Sources</h2>
+    <table><thead><tr>
+      <th>id</th><th>role</th><th>tier</th><th>layers</th><th>schedule</th><th>enabled</th>
+      <th class="num">budget/day</th><th class="num">rps</th><th>last run</th>
+      <th>watermark</th><th>domains</th>
+    </tr></thead><tbody id="sources"></tbody></table>
+  </section>
+
+  <section>
+    <h2>Runs</h2>
+    <table><thead><tr>
+      <th>run</th><th>started</th><th>finished</th><th>status</th><th>trigger</th>
+      <th>layer status</th><th>notes</th>
+    </tr></thead><tbody id="runs"></tbody></table>
+  </section>
+
+  <section>
+    <h2>Not yet available</h2>
+    <div class="grid" id="pending"></div>
+  </section>
+
+  <p class="note" id="foot"></p>
+</div>
+
+<script id="payload" type="application/json">/*__DATA__*/null</script>
+<script>
+const DATA = JSON.parse(document.getElementById('payload').textContent);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const num = (v, d = 1) => (v === null || v === undefined || Number.isNaN(v)) ? '—' : Number(v).toFixed(d);
+const money = (v) => v >= 1000 ? (v/1000).toFixed(1) + 'k' : Number(v).toFixed(0);
+
+function cards() {
+  const c = DATA.counts;
+  const entries = [
+    ['candidates', c.candidates], ['snapshots', c.snapshots], ['signals', c.signals],
+    ['sources enabled', c.sources_enabled + ' / ' + c.sources], ['runs', c.runs],
+  ];
+  document.getElementById('cards').innerHTML = entries.map(([label, value]) =>
+    `<div class="card"><b>${esc(value)}</b><span>${esc(label)}</span></div>`).join('');
+}
+
+// Sorting and filtering are client-side: the payload is already the whole answer, and a
+// static file has no server to ask.
+let view = { filter: '', sort: 'mgs', category: '', label: '' };
+
+function sortValue(item, key) {
+  const s = item.stored;
+  switch (key) {
+    case 'mgs': return -s.mgs;
+    case 'dv': return -s.sub_scores.dv;
+    case 'gap': return -s.gap;
+    case 'sp': return -s.sub_scores.sp;
+    case 'mp': return -s.sub_scores.mp;
+    case 'fe': return -s.sub_scores.fe;
+    case 'p90': return -s.revenue.p90;
+    case 'mentions': return -item.mentions;
+    case 'phrase': return item.phrase;
+    case 'category': return item.category;
+    case 'fad': return item.stored.fad.label;
+    case 'sources': return -item.evidence.source_count;
+    default: return 0;
+  }
+}
+
+function visible() {
+  const needle = view.filter.trim().toLowerCase();
+  return DATA.items
+    .filter((it) => !view.category || it.category === view.category)
+    .filter((it) => !view.label || it.stored.fad.label === view.label)
+    .filter((it) => !needle || (it.phrase + ' ' + it.category + ' ' +
+      it.evidence.sources.map((s) => s.source).join(' ')).toLowerCase().includes(needle))
+    .sort((a, b) => {
+      const av = sortValue(a, view.sort), bv = sortValue(b, view.sort);
+      return av < bv ? -1 : av > bv ? 1 : a.phrase.localeCompare(b.phrase);
+    });
+}
+
+function rows() {
+  const items = visible();
+  document.getElementById('rowcount').textContent =
+    `${items.length} of ${DATA.items.length} shown`;
+  document.getElementById('rows').innerHTML = items.map((it, index) => {
+    const s = it.stored, sub = s.sub_scores;
+    const src = it.evidence.sources.map((x) =>
+      `<span class="pill">${esc(x.source)} · ${x.signals}</span>`).join(' ');
+    return `<tr data-i="${index}">
+      <td class="num"><b>${num(s.mgs)}</b><div class="bar"><i style="width:${Math.max(0, Math.min(100, s.mgs))}%"></i></div></td>
+      <td class="num">${num(sub.dv, 0)}</td><td class="num">${num(sub.ss, 0)}</td>
+      <td class="num">${num(sub.sp, 0)}</td><td class="num">${num(sub.mp, 0)}</td>
+      <td class="num">${num(sub.fe, 0)}</td>
+      <td><span class="pill ${esc(s.fad.label)}">${esc(s.fad.label)} ${num(s.fad.probability, 2)}</span></td>
+      <td class="num">${money(s.revenue.p10)}–${money(s.revenue.p50)}–${money(s.revenue.p90)}</td>
+      <td><b>${esc(it.phrase)}</b></td>
+      <td>${esc(it.category_label)}</td>
+      <td class="num">${it.mentions}</td>
+      <td>${src}</td>
+    </tr>`;
+  }).join('');
+  [...document.querySelectorAll('#rows tr')].forEach((tr) => {
+    tr.addEventListener('click', () => detail(items[Number(tr.dataset.i)]));
+  });
+}
+
+function kv(pairs) {
+  return `<dl class="kv">${pairs.map(([k, v]) =>
+    `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>`;
+}
+
+function detail(it) {
+  if (!it) { document.getElementById('detail').innerHTML = ''; return; }
+  const s = it.stored, sub = s.sub_scores, f = it.evidence.features || {};
+  const m = Math.max(1, ...it.evidence.timeline.map((d) => d.count));
+  const timeline = it.evidence.timeline.map((d) =>
+    `<i style="height:${Math.round(100 * d.count / m)}%" title="${esc(d.day)}: ${d.count}"></i>`).join('');
+  const sourceBlocks = it.evidence.sources.map((x) => `
+    <div class="box">
+      <h4>${esc(x.source)} · ${x.signals} signals · ${esc(x.metrics.join(', '))}</h4>
+      ${kv([['best value', num(x.best_value, 0)], ['last seen', esc(x.last_seen || '—')]])}
+      ${x.quotes.map((q) => `<div class="quote"><em>${esc(q.text)}</em>
+        ${q.quote ? `<div>“${esc(q.quote)}”</div>` : ''}
+        ${q.url ? `<div class="tag">${esc(q.ts)} · <a href="${esc(q.url)}" target="_blank" rel="noopener">${esc(q.url)}</a></div>`
+                : `<div class="tag">${esc(q.ts)} · no url in source payload</div>`}</div>`).join('')}
+    </div>`).join('') || '<div class="pending">no matching signals in the lake right now</div>';
+
+  const history = it.history.map((h) => `
+    <tr><td class="tag">${esc(h.scored_at)}</td><td class="num">${num(h.mgs)}</td>
+    <td><span class="pill ${esc(h.fad_label)}">${esc(h.fad_label)}</span></td>
+    <td class="tag">${esc(h.weights_version)}</td>
+    <td class="tag">${esc(h.run_status)} ${esc(h.run_id.slice(0, 8))}</td></tr>`).join('');
+
+  document.getElementById('detail').innerHTML = `
+  <section>
+    <h2>Detail — ${esc(it.phrase)} <span class="tag">[${esc(it.category)}]</span></h2>
+    <div class="detail">
+      <div class="grid">
+        <div class="box">
+          <h4>Score — stored</h4>
+          ${kv([
+            ['MGS', `<b>${num(s.mgs)}</b> = 0.30·DV + 0.25·(100−SS) + 0.20·SP + 0.15·MP + 0.10·FE`],
+            ['DV demand velocity', num(sub.dv)], ['SS saturation', num(sub.ss)],
+            ['headroom (100−SS)', num(s.gap)], ['SP seller pain', num(sub.sp)],
+            ['MP money', num(sub.mp)], ['FE feasibility', num(sub.fe)],
+            ['fad', `<span class="pill ${esc(s.fad.label)}">${esc(s.fad.label)}</span> p=${num(s.fad.probability, 3)}`],
+            ['weights version', esc(s.weights_version)],
+          ])}
+        </div>
+        <div class="box">
+          <h4>Money — Monte Carlo, stored</h4>
+          ${kv([
+            ['P10 / P50 / P90', `<b>$${money(s.revenue.p10)} — $${money(s.revenue.p50)} — $${money(s.revenue.p90)}</b>`],
+            ['model', esc(s.revenue_model.version)],
+            ['TAM scale ×σ', `${s.revenue_model.tam_scale} × ${s.revenue_model.tam_sigma}`],
+            ['CTR beta', `${s.revenue_model.ctr_alpha}, ${s.revenue_model.ctr_beta}`],
+            ['CVR beta', `${s.revenue_model.cvr_alpha}, ${s.revenue_model.cvr_beta}`],
+            ['draws', s.revenue_model.draws],
+          ])}
+        </div>
+        <div class="box">
+          <h4>Evidence — recomputed from the lake</h4>
+          ${kv([
+            ['signals matching', it.evidence.signal_count],
+            ['distinct sources', it.evidence.source_count],
+            ['days present (45d)', it.evidence.days_present],
+            ['mentions at mining', it.mentions],
+          ])}
+          <div class="timeline">${timeline}</div>
+          <div class="label">${esc(it.evidence.timeline[0]?.day || '')} → ${esc(it.evidence.timeline.at(-1)?.day || '')}</div>
+        </div>
+        <div class="box">
+          <h4>Features — recomputed</h4>
+          ${kv([
+            ['volume 30/90/365d', `${num(f.volume_30d, 0)} / ${num(f.volume_90d, 0)} / ${num(f.volume_365d, 0)}`],
+            ['EWMA 30d', num(f.ewma_30d, 2)],
+            ['slope 30/90/365', `${num(f.slope_30d, 3)} / ${num(f.slope_90d, 3)} / ${num(f.slope_365d, 3)}`],
+            ['slope divergence', num(f.slope_divergence, 3)],
+            ['growth vs prior 60d', num(f.growth, 3)],
+            ['spike ratio', num(f.spike_ratio, 2)],
+            ['seasonality', num(f.seasonality, 2)],
+            ['evergreen ratio', num(f.evergreen_ratio, 3)],
+            ['pain / intent signals', `${f.pain_signals ?? '—'} / ${f.intent_signals ?? '—'}`],
+            ['days since last', f.days_since_last ?? '—'],
+          ])}
+        </div>
+        <div class="box">
+          <h4>Provenance</h4>
+          ${kv([
+            ['candidate id', it.candidate_id],
+            ['run', `<span class="tag">${esc(s.run_id)}</span>`],
+            ['scored at', esc(s.scored_at)],
+            ['snapshots recorded', it.history.length],
+          ])}
+          <table><thead><tr><th>scored</th><th class="num">MGS</th><th>fad</th><th>weights</th><th>run</th></tr></thead>
+          <tbody>${history}</tbody></table>
+        </div>
+      </div>
+
+      <h4 style="margin:16px 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim)">All sources that mentioned this phrase, with quotes</h4>
+      <div class="grid">${sourceBlocks}</div>
+
+      <h4 style="margin:16px 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim)">Still missing</h4>
+      <div class="grid">${Object.entries(it.pending).map(([k, v]) =>
+        `<div class="pending"><b>${esc(k)}</b> — ${esc(v)}</div>`).join('')}</div>
+    </div>
+  </section>`;
+  document.getElementById('detail').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function sources() {
+  document.getElementById('sources').innerHTML = DATA.sources.map((s) => {
+    const last = s.last || {};
+    return `<tr>
+      <td><b>${esc(s.id)}</b></td><td>${esc(s.role)}</td><td>${esc(s.tier)}</td>
+      <td class="tag">${esc(s.layers.join(', '))}</td><td>${esc(s.schedule)}</td>
+      <td><span class="pill ${s.enabled ? 'ok' : 'skipped'}">${s.enabled ? 'enabled' : 'disabled'}</span></td>
+      <td class="num">${s.budget_per_day}</td><td class="num">${num(s.rps, 2)}</td>
+      <td><span class="pill ${esc(last.status || 'never_run')}">${esc(last.status || 'never run')}</span>
+        <div class="tag">${esc(last.at || '')}${last.items_new !== undefined ? ` · ${last.items_new} new / ${last.items_fetched} fetched` : ''}</div>
+        ${last.reason ? `<div class="tag">${esc(last.reason)}</div>` : ''}</td>
+      <td class="tag">${s.watermark ? esc(String(s.watermark).slice(0, 40)) : '—'}
+        ${s.watermark_updated_at ? `<div>${esc(s.watermark_updated_at.slice(0, 16))}</div>` : ''}</td>
+      <td class="tag">${esc(s.domains.join(', '))}</td>
+    </tr>`;
+  }).join('');
+}
+
+function runs() {
+  document.getElementById('runs').innerHTML = DATA.runs.map((r) => `
+    <tr><td class="tag">${esc(r.run_id.slice(0, 8))}</td><td class="tag">${esc(r.started_at)}</td>
+    <td class="tag">${esc(r.finished_at || '—')}</td>
+    <td><span class="pill ${esc(r.status)}">${esc(r.status)}</span></td>
+    <td>${esc(r.trigger)}</td>
+    <td class="tag">${Object.entries(r.layer_status).map(([k, v]) =>
+      `${esc(k)}: ${esc(v.status || '')}`).join(' · ') || '—'}</td>
+    <td class="tag">${esc(r.notes || '')}</td></tr>`).join('');
+}
+
+function pending() {
+  document.getElementById('pending').innerHTML = Object.entries(DATA.pending).map(([k, v]) =>
+    `<div class="pending"><b>${esc(k)}</b> — ${esc(v)}</div>`).join('');
+}
+
+cards(); sources(); runs(); pending(); rows();
+const scope = DATA.view_run || {};
+document.getElementById('scope').innerHTML = scope.run_id
+  ? `showing <b>${esc(scope.scope)}</b> · run <span class="tag">${esc(scope.run_id)}</span> ` +
+    `${esc(scope.status)} · started ${esc(scope.started_at)} · ${esc(scope.notes || '')}`
+  : `showing <b>${esc(scope.scope || 'every run')}</b>`;
+// Deep link: #item=<phrase> opens that item, so a single result is a URL you can keep.
+const wanted = decodeURIComponent((location.hash.match(/item=([^&]*)/) || [])[1] || '');
+if (wanted) {
+  const match = DATA.items.find((it) => it.phrase.toLowerCase() === wanted.toLowerCase())
+    || DATA.items.find((it) => it.phrase.toLowerCase().includes(wanted.toLowerCase()));
+  if (match) detail(match);
+}
+document.getElementById('foot').textContent =
+  `built ${DATA.generated_at} · reference instant ${DATA.as_of} · ` +
+  'regenerate: uv run python -m trend_analyst.viewer.build --out docs/viewer/index.html';
+document.getElementById('filter').addEventListener('input', (e) => { view.filter = e.target.value; rows(); });
+document.getElementById('sort').addEventListener('change', (e) => { view.sort = e.target.value; rows(); });
+document.getElementById('label').addEventListener('change', (e) => { view.label = e.target.value; rows(); });
+document.getElementById('category').addEventListener('change', (e) => { view.category = e.target.value; rows(); });
+document.getElementById('category').innerHTML += DATA.items
+  .map((i) => i.category).filter((v, i, a) => a.indexOf(v) === i).sort()
+  .map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+[...document.querySelectorAll('th[data-k]')].forEach((th) => th.addEventListener('click', () => {
+  view.sort = th.dataset.k; document.getElementById('sort').value = th.dataset.k; rows();
+}));
+</script>
+</body>
+</html>

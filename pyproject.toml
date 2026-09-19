@@ -87,6 +87,8 @@ ignore = [
 "scripts/**" = ["T201"]
 "src/trend_analyst/monitor/health.py" = ["T201"]
 "src/trend_analyst/pipeline/orchestrator.py" = ["T201"]
+# The viewer builder is a CLI too: it writes a file and reports where it went.
+"src/trend_analyst/viewer/build.py" = ["T201"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["trend_analyst", "config"]
