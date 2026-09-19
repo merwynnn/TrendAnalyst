@@ -209,6 +209,47 @@ assert payload["database"]["ok"], "the database must be reachable for this check
 PY
 }
 check "health CLI — valid report, exit code matches status" health_probe
+p2_probe() {
+# P2 acceptance: the ranked table renders end-to-end from L0 data, snapshots are versioned,
+# and replaying the same lake reproduces the same scores (spec 5.4, hash-asserted in CI).
+local first second hash1 hash2
+first=$(uv run python -m trend_analyst.pipeline.orchestrator --layers L1,L3 --top 3 --json 2>/dev/null)
+second=$(uv run python -m trend_analyst.pipeline.orchestrator --layers L1,L3 --top 3 --json 2>/dev/null)
+hash1=$(printf '%s' "$first" | uv run python -c 'import json,sys; print(json.load(sys.stdin)["snapshot_hash"])')
+hash2=$(printf '%s' "$second" | uv run python -c 'import json,sys; print(json.load(sys.stdin)["snapshot_hash"])')
+json_out=$(mktemp)
+printf '%s' "$first" > "$json_out"
+# NB: the payload goes through a file, not a pipe: with `python - <<HEREDOC` the heredoc IS
+# stdin, so a piped payload is never read (the first draft of this check did exactly that and
+# failed silently while still reporting PASS).
+uv run python - "$json_out" <<'PROBE' || { rm -f "$json_out"; return 1; }
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+mining, scoring = payload["mining"], payload["scoring"]
+print(f"texts: {mining['texts']} · ngrams: {mining['ngrams']} · candidates: {mining['mined']}")
+print(f"kept {mining['kept']} (pruned {mining['pruned']}, unmatched {mining['unmatched']}) "
+      f"-> scored {scoring['scored']}")
+print(f"snapshots: {payload['snapshots_written']} new in this run")
+assert payload["snapshots_written"] > 0, "the decide layer must write snapshots from L0 data"
+assert mining["texts"] > 50, "the lake must hold real collected text"
+assert scoring["scored"] == payload["snapshots_written"], "every scored candidate is snapshotted"
+assert payload["top"], "the ranked table must have rows"
+assert all(0 <= row["mgs"] <= 100 for row in payload["top"]), "MGS stays inside 0-100"
+PROBE
+rm -f "$json_out"
+if [ ${#hash1} -lt 32 ] || [ ${#hash2} -lt 32 ]; then
+  printf 'replay determinism: no usable snapshot hash (%s, %s) - check failed rather than passed
+' "$hash1" "$hash2"
+  return 1
+fi
+if [ "$hash1" != "$hash2" ]; then
+  printf 'replay determinism failed: %s != %s\n' "$hash1" "$hash2"
+  return 1
+fi
+printf 'replay determinism: identical snapshot hash %s\n' "${hash1:0:16}"
+}
+check "P2 decide — rank, snapshot, deterministic replay" p2_probe
 # --- summary -----------------------------------------------------------------
 header "Summary"
 if [ "$failures" -eq 0 ]; then

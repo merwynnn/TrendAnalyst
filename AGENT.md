@@ -50,6 +50,10 @@ TA_MIGRATION_TRACE=1 uv run alembic upgrade head   # where did a migration stop?
 
 # Run L0 (resumes a crashed run automatically; one source failing never stops the rest)
 uv run python -m trend_analyst.pipeline.orchestrator --layers L0
+uv run python -m trend_analyst.pipeline.orchestrator --layers L1,L3   # mine, score, snapshot
+uv run python -m trend_analyst.pipeline.orchestrator --rank            # the ranked table, from snapshots
+uv run python -m scripts.seed_evals --count 10                         # seed golden eval cases from real output
+uv run python -m scripts.category_coverage                             # how much of the lake the taxonomy matches
 uv run python -m trend_analyst.pipeline.orchestrator --json            # machine-readable
 uv run python -m trend_analyst.pipeline.orchestrator --dry-run         # fetch and parse, write nothing
 uv run python -m trend_analyst.pipeline.orchestrator --limit 1         # crash drill: leave a run open

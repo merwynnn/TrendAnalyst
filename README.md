@@ -18,14 +18,15 @@ Judge, Writer) with hard budgets.
 | Phase | Scope | State |
 |---|---|---|
 | **P0** | Skeleton, layered config, `sources.yaml` registry (+Tier-A-in-L0 hard-fail), Postgres models + first migration, health CLI | **done** — see [`docs/evidence/P0.md`](docs/evidence/P0.md) (outcome) and [`P0-gate.md`](docs/evidence/P0-gate.md) (raw gate output) |
+| **P2** | L1 mining + scoring v1: phrase extraction, per-category EWMA z-scores, 95% prune, MGS in code, fad flag, Monte Carlo revenue, 10 golden eval cases | **done** — see [`docs/evidence/P2.md`](docs/evidence/P2.md) (outcome) and [`P2-gate.md`](docs/evidence/P2-gate.md) (raw gate output) |
 | **P1** | L0 collectors (HN, Wikipedia, Arctic Shift) + run ledger, watermarks, content-hash dedup, kill-and-resume | **done** — see [`docs/evidence/P1.md`](docs/evidence/P1.md) (outcome) and [`P1-gate.md`](docs/evidence/P1-gate.md) (raw gate output) |
 | P2 | L1 mining + scoring v1 (MGS, fad features, Monte Carlo revenue) | not started |
 | P3 | LLM gates, gateway, cache | not started |
 | P4 | L2 enrichment, briefs, snapshots, TTL jobs | not started |
 | P5 | AGENT.md + USER_SETUP.md to bar, 50 golden evals, CI, monitor dry-run | not started |
 
-Gate: `bash scripts/gate.sh` — 12 checks, currently **PASS (0 pending)**. Run it after any
-change; it regenerates `docs/evidence/P1-gate.md` with raw output instead of a claim.
+Gate: `bash scripts/gate.sh` — 13 checks, currently **PASS (0 pending)**. Run it after any
+change; it regenerates `docs/evidence/P2-gate.md` with raw output instead of a claim.
 
 Task tracking lives in `beans` (`.beans/`), not in this file: `beans list --ready`.
 

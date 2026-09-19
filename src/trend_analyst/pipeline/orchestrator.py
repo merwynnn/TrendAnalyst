@@ -1,4 +1,7 @@
-"""L0 collection: run every enabled L0 source, in registry order, resumably (spec §2, §5).
+"""The pipeline's entry point: L0 collection (P1) and the L1+L3 decide run (P2).
+
+L0 collects; L1 mines; L3 scores. Each layer's own module holds its logic — this file owns
+the CLI, the layer selection and the L0 loop below.
 
 The loop is deliberately dull — deterministic code, checkpoints, no agent framework:
 
@@ -31,10 +34,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, sessionmaker
 
+from config.categories import TaxonomyError, default_taxonomy
 from config.settings import ConfigError, default_config_dir, load_settings
 from trend_analyst.logging import configure_logging, get_logger, log_event
 from trend_analyst.net import (
@@ -45,6 +49,8 @@ from trend_analyst.net import (
     RecordedHttpClient,
     fixture_path,
 )
+from trend_analyst.pipeline.decide import read_ranked, run_decide
+from trend_analyst.pipeline.layers.l1 import DEFAULT_MIN_KEEP, DEFAULT_PRUNE_FRACTION
 from trend_analyst.pipeline.state import (
     RunHandle,
     advance_watermark,
@@ -602,9 +608,14 @@ def _limits_factory(*, fixtures_dir: Path | None) -> Callable[[SourceEntry], int
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m trend_analyst.pipeline.orchestrator",
-        description="Run the L0 collection layer (spec §2).",
+        description="Run pipeline layers: L0 collect (spec §2), L1+L3 mine and score.",
     )
-    parser.add_argument("--layers", default="L0", help="layers to run (only L0 exists in P1)")
+    parser.add_argument(
+        "--layers",
+        default="L0",
+        metavar="L0,L1,L3",
+        help="layers to run: L0 (collect), L1+L3 (mine, score, snapshot). L2 is P4.",
+    )
     parser.add_argument("--source", action="append", default=[], help="limit to these source ids")
     parser.add_argument(
         "--limit", type=int, default=None, help="stop after N sources (crash drill)"
@@ -619,23 +630,54 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config-dir", default=None, help="directory holding sources.yaml")
     parser.add_argument("--json", action="store_true", help="machine-readable report")
+    # Decide-layer knobs (L1+L3).
+    parser.add_argument("--top", type=int, default=10, help="rows in the ranked table")
+    parser.add_argument(
+        "--min-keep",
+        type=int,
+        default=DEFAULT_MIN_KEEP,
+        help="mining floor: never prune below this many candidates (brief: 95%% prune)",
+    )
+    parser.add_argument(
+        "--prune-fraction",
+        type=float,
+        default=DEFAULT_PRUNE_FRACTION,
+        help="share of mined phrases to keep, by velocity (default 0.05)",
+    )
+    parser.add_argument(
+        "--as-of",
+        default=None,
+        metavar="ISO8601",
+        help="pin the scoring instant (replay determinism); defaults to now, or to the "
+        "newest signal when replaying fixtures",
+    )
+    parser.add_argument(
+        "--rank",
+        action="store_true",
+        help="print the ranked table from the snapshot history and exit",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    if args.layers != "L0":
-        print(
-            f"only L0 exists in P1 (asked for {args.layers!r}); L1-L3 land in P2-P4",
-            file=sys.stderr,
+    requested = {layer.strip().upper() for layer in args.layers.split(",") if layer.strip()}
+    unknown = requested - {"L0", "L1", "L3"}
+    if unknown:
+        detail = (
+            "L2 is P4 (it needs Tier-A sources and budgets)"
+            if "L2" in unknown
+            else f"unknown layer(s) {sorted(unknown)}"
         )
+        print(f"cannot run {args.layers!r}: {detail}", file=sys.stderr)
         return 1
 
     config_dir = Path(args.config_dir) if args.config_dir else default_config_dir()
     try:
         settings = load_settings(config_dir)
         registry = load_registry(default_registry_path(config_dir))
-    except (ConfigError, Exception) as exc:
+        taxonomy = default_taxonomy(config_dir)
+    except (ConfigError, TaxonomyError) as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 1
 
@@ -653,35 +695,114 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("database not configured: run scripts/provision_pg.sh", file=sys.stderr)
         return 1
 
+    sessions = create_session_factory(engine)
+    exit_code = 0
+    try:
+        if args.rank:
+            with sessions() as session:
+                ranked = read_ranked(session, limit=args.top)
+            print(_render_ranked(ranked))
+            return 0
+
+        if "L0" in requested:
+            exit_code = _run_l0_cli(args, registry, sessions, engine)
+
+        if requested & {"L1", "L3"}:
+            decide = run_decide(
+                sessions=sessions,
+                taxonomy=taxonomy,
+                as_of=_resolve_as_of(args, sessions),
+                trigger="manual",
+                min_keep=args.min_keep,
+                prune_fraction=args.prune_fraction,
+                source_ids=args.source or None,
+                dry_run=args.dry_run,
+                top=args.top,
+            )
+            if args.json:
+                print(json.dumps(decide.summary(), indent=2, default=str))
+            else:
+                print(decide.render(top=args.top))
+    finally:
+        engine.dispose()
+    return exit_code
+
+
+def _resolve_as_of(args: Any, sessions: sessionmaker[Session]) -> datetime:
+    """Pick the scoring instant: --as-of, else the newest signal, else now.
+
+    The newest-signal default is what makes an offline replay deterministic: fixtures are
+    recorded once, so scoring against their newest timestamp reproduces the same windows on
+    every replay. In production the two are the same instant to within a collection cycle,
+    and using the data's own clock still beats the wall clock (spec §5.4).
+    """
+    if args.as_of:
+        return datetime.fromisoformat(args.as_of.replace("Z", "+00:00"))
+    if args.fixtures:
+        with sessions() as session:
+            newest = session.execute(select(func.max(SignalRow.ts))).scalar_one_or_none()
+        if newest is not None:
+            return newest if newest.tzinfo else newest.replace(tzinfo=UTC)
+    return datetime.now(UTC)
+
+
+
+
+def _render_ranked(ranked: Sequence[Any]) -> str:
+    """Print the ranked table from stored snapshots (`--rank`).
+
+    Reads the snapshot history rather than recomputing, which is the point of the table
+    being append-only: what this prints is what the database decided, including rows scored
+    by an older weights version.
+    """
+    if not ranked:
+        return "no score snapshots yet - run --layers L0,L1,L3 first"
+    header = (
+        f"{'MGS':>5}  {'DV':>4} {'SS':>4} {'SP':>4} {'MP':>4} {'FE':>4}  "
+        f"{'fad':>9}  {'prob':>5}  {'$/mo P10-P50-P90':>24}  phrase"
+    )
+    rows = [header, "-" * len(header)]
+    for score in ranked:
+        money = f"{score.revenue_p10:,.0f}-{score.revenue_p50:,.0f}-{score.revenue_p90:,.0f}"
+        rows.append(
+            f"{score.mgs:5.1f}  {score.demand_velocity:4.0f} {score.saturation:4.0f} "
+            f"{score.buyer_pain:4.0f} {score.money:4.0f} {score.feasibility:4.0f}  "
+            f"{score.fad_label:>9}  {score.fad_probability:5.2f}  {money:>24}  "
+            f"{score.phrase} [{score.category}] w={score.weights_version}"
+        )
+    rows.append("-" * len(header))
+    return "\n".join(rows)
+
+
+def _run_l0_cli(
+    args: Any,
+    registry: Any,
+    sessions: sessionmaker[Session],
+    engine: Engine,
+) -> int:
+    """Run L0 from the CLI's arguments and print the report. Returns the exit code."""
+    fixtures_dir = Path(args.fixtures) if args.fixtures else None
     report = run_l0(
         registry=registry,
-        sessions=create_session_factory(engine),
+        sessions=sessions,
         engine=engine,
-        client_for=_client_factory(
-            registry=registry,
-            fixtures_dir=Path(args.fixtures) if args.fixtures else None,
-            timeout_s=30.0,
-        ),
-        clock_for=_clock_factory(
-            fixtures_dir=Path(args.fixtures) if args.fixtures else None
-        ),
-        max_items_for=_limits_factory(
-            fixtures_dir=Path(args.fixtures) if args.fixtures else None
-        ),
+        client_for=_client_factory(registry=registry, fixtures_dir=fixtures_dir, timeout_s=30.0),
+        clock_for=_clock_factory(fixtures_dir=fixtures_dir),
+        max_items_for=_limits_factory(fixtures_dir=fixtures_dir),
         trigger="manual",
         resume=not args.no_resume,
         source_ids=args.source or None,
         max_sources=args.limit,
         dry_run=args.dry_run,
     )
-    engine.dispose()
-
     if args.json:
-        payload = {
-            **report.summary(),
-            "outcomes": [asdict(outcome) for outcome in report.outcomes],
-        }
-        print(json.dumps(payload, indent=2, default=str))
+        print(
+            json.dumps(
+                {**report.summary(), "outcomes": [asdict(o) for o in report.outcomes]},
+                indent=2,
+                default=str,
+            )
+        )
     else:
         print(report.render())
     return 0 if report.status in {"ok", "partial"} else 1

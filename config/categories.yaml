@@ -1,14 +1,187 @@
 # ---------------------------------------------------------------------------
 # Trend Analyst — category taxonomy (spec §6.1).
 #
-# Scores are per-category percentiles, so every candidate must resolve to exactly
-# one category. `keywords` seeds the L1 phrase classifier and `price_band` feeds
-# the Money sub-score (MP) and the revenue Monte Carlo.
+# MGS sub-scores are PER-CATEGORY percentiles, so every candidate must land in exactly
+# one category. The lists below are deliberately small and readable: they are matched
+# against real signal text (HN titles, Reddit post titles), and the coverage of that
+# match is measured and reported rather than assumed
+# (`python -m scripts.category_coverage` prints it).
 #
-# TODO(P2): the real taxonomy is authored together with the L1 miner — it must be
-# derived from what the L0 sources actually produce, not invented up front.
+# Per category:
+#   core              the BUYABLE nouns of the domain: a phrase must contain at least one
+#                     to be filed under this category. This is what stops "Cat Jarman" (a
+#                     person) and "children killing" (a headline) from being mined as pet and
+#                     baby products, which the first mining run did before this list existed.
+#   keywords          context words: they break ties between categories, they do not create one
+#   price_band        typical retail price in USD — the Money sub-score's prior
+#   feasibility_prior how shippable this domain is for a solo operator, 0-100
+#
+# Top-level feasibility_penalties are subtracted from the prior when a phrase mentions
+# one: they are the reasons an otherwise good product idea is not a solo project.
+#
+# This is a PRIOR, not a verdict: from P4 the Tier-A sources (eBay sold-vs-listed,
+# reviews, ad libraries) sharpen price and saturation with observed data. Until then the
+# scoring code says so in its docstrings instead of pretending the numbers are measured.
 # ---------------------------------------------------------------------------
 
 version: 1
 
-categories: []
+#: Words that make a product hard to ship alone, whatever the category.
+feasibility_penalties:
+  - patent
+  - regulated
+  - fda
+  - medical device
+  - prescription
+  - hazmat
+  - lithium battery
+  - firearm
+  - licensed
+  - insurance
+  - warranty claim
+
+#: Noise that never becomes a candidate: navigation, weekly threads, meta posts.
+stop_phrases:
+  - weekly thread
+  - daily thread
+  - megathread
+  - question thread
+  - buy sell trade
+  - self promotion
+  - announcement
+  - rss
+  - subscribe
+  - newsletter
+  - podcast
+
+categories:
+  home_office:
+    label: Home office and desk
+    price_band: [25, 180]
+    feasibility_prior: 82
+    keywords:
+      [desk, standing desk, chair, ergonomic, monitor arm, monitor stand, cable management,
+       desk mat, footrest, lumbar, laptop stand, webcam, desk lamp, whiteboard, filing,
+       keyboard tray, screen, wrist rest, headset, sit stand]
+    core: [
+      desk, standing desk, chair, monitor arm, monitor stand, desk mat, footrest,
+      laptop stand, keyboard tray, wrist rest, desk lamp, cable management, whiteboard,
+      drawer organizer,
+    ]
+
+  kitchen_dining:
+    label: Kitchen and dining
+    price_band: [15, 150]
+    feasibility_prior: 74
+    keywords:
+      [kitchen, coffee, espresso, grinder, pour over, kettle, mug, blender, knife, sharpener,
+       cookware, pan, skillet, cutting board, food storage, container, lunchbox, thermos,
+       dishwasher, sink, faucet, spice, salt, pepper mill]
+    core: [
+      coffee grinder, espresso machine, kettle, mug, blender, knife, sharpener, pan, skillet,
+      cutting board, food container, thermos, lunchbox, faucet, pepper mill, dishwasher rack,
+    ]
+
+  home_improvement:
+    label: Home improvement and repair
+    price_band: [20, 200]
+    feasibility_prior: 78
+    keywords:
+      [drill, screwdriver, screw, anchor, drywall, paint, caulk, sealant, plumbing, pipe,
+       leak, drain, hvac, filter, insulation, weatherstrip, gutter, tile, grout, hinge,
+       latch, ladder, tape measure, level, stud finder]
+    core: [
+      drill, screwdriver, anchor, caulk, sealant, pipe, drain, filter, insulation,
+      weatherstrip, gutter, grout, hinge, latch, ladder, tape measure, stud finder,
+      paint roller, drywall patch,
+    ]
+
+  outdoor_garden:
+    label: Outdoor, garden and camping
+    price_band: [20, 250]
+    feasibility_prior: 76
+    keywords:
+      [garden, planter, soil, compost, seed, seedling, pruning, patio, deck, grill, barbecue,
+       camping, tent, hammock, backpack, trail, hiking, lawn, mower, watering, greenhouse,
+       bird feeder, fire pit, cooler]
+    core: [
+      planter, compost bin, pruning shears, grill, tent, hammock, backpack, mower,
+      watering can, greenhouse, bird feeder, fire pit, cooler, garden hose, sprinkler,
+    ]
+
+  pets:
+    label: Pets
+    price_band: [15, 140]
+    feasibility_prior: 80
+    keywords:
+      [dog, cat, puppy, kitten, pet, leash, collar, harness, crate, litter, aquarium, tank,
+       bird, reptile, chew, grooming, vet, fur, shedding, scratching, feeding]
+    core: [
+      leash, collar, harness, crate, litter box, litter, aquarium, feeder, water fountain,
+      pet bed, carrier, brush, scratching post, chew toy, tank filter,
+    ]
+
+  fitness_recovery:
+    label: Fitness and recovery
+    price_band: [20, 220]
+    feasibility_prior: 72
+    keywords:
+      [fitness, gym, workout, yoga, mat, resistance, dumbbell, barbell, running, shoe,
+       cycling, bike, swim, massage, foam roller, recovery, stretch, posture, sleep,
+       pillow, mattress, compression, knee, ankle, wrist brace]
+    core: [
+      yoga mat, resistance band, dumbbell, foam roller, massage gun, pillow,
+      compression sleeve, knee brace, ankle brace, wrist brace, bike trainer, jump rope,
+    ]
+
+  electronics_accessories:
+    label: Electronics and accessories
+    price_band: [15, 200]
+    feasibility_prior: 68
+    keywords:
+      [usb, charger, charging, battery, power bank, cable, adapter, hub, dock, ssd, hard drive,
+       memory card, router, wifi, ethernet, webcam, microphone, speaker, headphone, earbuds,
+       phone case, screen protector, mount, tablet, laptop, monitor, raspberry pi]
+    core: [
+      charger, power bank, cable, adapter, hub, dock, ssd, memory card, router, webcam,
+      microphone, speaker, headphones, earbuds, phone case, screen protector, monitor, mouse,
+    ]
+
+  tools_diy:
+    label: Tools, making and DIY
+    price_band: [25, 300]
+    feasibility_prior: 77
+    keywords:
+      [3d print, 3d printer, filament, cnc, laser, welding, solder, soldering, workshop,
+       workbench, clamp, vise, jig, caliper, drill press, sander, saw, chisel, epoxy, resin,
+       mold, casting, engraving, hardware, fastener, bolt, thread]
+    core: [
+      3d printer, filament, cnc, laser, welding, solder, clamp, vise, jig, caliper,
+      drill press, sander, saw, chisel, epoxy, resin, mold, engraving, fastener, bolt,
+    ]
+
+  baby_kids:
+    label: Baby and kids
+    price_band: [15, 160]
+    feasibility_prior: 70
+    keywords:
+      [baby, toddler, infant, stroller, crib, bassinet, diaper, nursing, bottle, pacifier,
+       teething, high chair, car seat, kid, children, toy, puzzle, craft, school, backpack,
+       lunch, safety gate, monitor]
+    core: [
+      stroller, crib, bassinet, diaper, nursing bottle, pacifier, teething toy, high chair,
+      car seat, safety gate, baby monitor, toy, puzzle,
+    ]
+
+  music_audio:
+    label: Music and audio
+    price_band: [25, 300]
+    feasibility_prior: 71
+    keywords:
+      [guitar, bass, pedal, amp, amplifier, synth, synthesizer, keyboard, piano, drum, cymbal,
+       mic, microphone, audio interface, mixer, turntable, vinyl, headphone amp, cable,
+       stand, capo, strings, pick, tuner, metronome]
+    core: [
+      guitar, bass, pedal, amp, synth, piano, drum, cymbal, microphone, audio interface,
+      mixer, turntable, capo, strings, pick, tuner, metronome, headphone amp,
+    ]
