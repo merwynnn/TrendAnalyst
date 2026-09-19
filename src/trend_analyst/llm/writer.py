@@ -396,6 +396,13 @@ def _write_one(
     if outcome.provider and outcome.provider not in report.providers:
         report.providers.append(outcome.provider)
 
+    if outcome.dry_run:
+        # Nothing was called, so there is nothing to write: a dry run is a stop with a reason, not a
+        # degradation. Reporting it as `degraded` said "the provider failed" about a run that made
+        # no request at all.
+        return _WriteStep(stop=True, status="dry-run",
+                          reason="dry run: the gate was not called")
+
     if outcome.capped:
         return _WriteStep(stop=True, status="partial",
                           reason=outcome.reason or "the gate was capped before this brief")

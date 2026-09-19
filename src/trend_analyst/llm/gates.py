@@ -497,6 +497,16 @@ def _judge_one_batch(
     if outcome.provider and outcome.provider not in report.providers:
         report.providers.append(outcome.provider)
 
+    if outcome.dry_run:
+        # Nothing was called, so nothing can be judged: a dry run is a stop with a reason, not a
+        # degradation. Reporting it as `degraded` said "the provider failed" about a run that made
+        # no request at all.
+        report.per_batch.append(
+            {"batch": report.batches, "status": "dry-run", "reason": outcome.reason[:200]}
+        )
+        return _BatchStep(stop=True, status="dry-run",
+                          reason="dry run: the gate was not called")
+
     if outcome.capped:
         # A cap is the gateway choosing not to spend: partial by design, with the unjudged
         # candidates named. Reporting it as `degraded` conflated "we decided not to call" with "the

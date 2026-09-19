@@ -274,6 +274,31 @@ assert judge["status"] == "ok", judge["reason"]
 PROBE
 }
 check "P3 judge — offline replay of a recorded verdict" p3_probe
+p4_probe() {
+# P4 acceptance, offline: every layer in order, then the ledger reconciled to zero unexplained
+# spend. This is the brief's bar ("quota ledger balanced to zero unexplained spend") run end to end
+# on recorded fixtures and recorded gate answers, so it costs nothing and can run on every gate.
+local out
+out=$(uv run python -m scripts.nightly --offline --dry-run --json 2>/dev/null)
+printf '%s' "$out" > "${TMPDIR:-/tmp}/ta_p4.json"
+uv run python - "${TMPDIR:-/tmp}/ta_p4.json" <<'PROBE' || return 1
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+print(f"L0 {payload['l0']['status']} · decide {payload['decide']['status']} "
+      f"({payload['decide']['scored']} scored) · judge {payload['judge']['status']} · "
+      f"writer {payload['writer']['status']}")
+rec = payload["reconciliation"]
+print(f"ledger: {rec['rows']} rows, {rec['spend_total']} units, {rec['explained']} explained, "
+      f"balanced={rec['balanced']}")
+assert payload["l0"]["status"] in {"ok", "partial", "degraded"}, payload["l0"]
+assert payload["decide"]["scored"] > 0, "the decide layer must score candidates from the lake"
+assert rec["balanced"], rec["unexplained"][:3]
+assert rec["rows"] > 0, "the nightly run must have spent something to reconcile"
+assert any("offline: replaying" in note for note in payload["notes"]), payload["notes"]
+PROBE
+}
+check "P4 nightly — all layers then a balanced ledger" p4_probe
 # --- summary -----------------------------------------------------------------
 header "Summary"
 if [ "$failures" -eq 0 ]; then

@@ -158,6 +158,10 @@ class GatewayOutcome:
     #: True when the reason is a cap (we chose not to spend), False when providers failed. A monitor
     #: agent acts differently on each: a cap is a budget conversation, a failure is an incident.
     capped: bool = False
+    #: True when nobody was called because the caller asked for a dry run. Distinct from `capped`
+    #: (a budget decision) and from a failure, because a report that calls a dry run "degraded" is
+    #: telling the reader a provider broke when nothing was even asked.
+    dry_run: bool = False
     prompt_tokens: int = 0
     completion_tokens: int = 0
     removed_quotes: int = 0
@@ -178,6 +182,7 @@ class GatewayOutcome:
             "cached": self.cached,
             "attempts": self.attempts,
             "capped": self.capped,
+            "dry_run": self.dry_run,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "removed_quotes": self.removed_quotes,
@@ -278,6 +283,18 @@ def call_gate(
                 ungrounded=bool(getattr(cleaned, "ungrounded", False)),
             )
 
+    if dry_run:
+        # Nothing is called, so there is nothing to fail over from. Handled once, up front, rather
+        # than inside the loop: the honest answer ("we chose not to call") does not depend on which
+        # provider would have run, and the gates read `dry_run` to report a stop rather than a
+        # provider failure.
+        return GatewayOutcome(
+            status="skipped",
+            gate=gate,
+            dry_run=True,
+            reason="dry run: the provider was not called",
+        )
+
     attempts = 0
     failures: list[str] = []
 
@@ -288,9 +305,6 @@ def call_gate(
         schema_retries = 0
         for attempt in range(1, _TRANSIENT_ATTEMPTS + 1):
             attempts += 1
-            if dry_run:
-                failures.append(f"{provider}: dry run, provider not called")
-                break
             try:
                 raw, prompt_tokens, completion_tokens = sender(provider, prompt)
             except Exception as exc:  # any provider failure fails over, never aborts the gate

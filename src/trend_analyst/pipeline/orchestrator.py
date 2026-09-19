@@ -602,9 +602,15 @@ def _clock_factory(
         return lambda _entry: SystemClock()
 
     def recorded(entry: SourceEntry) -> Any:
-        payload = json.loads(
-            fixture_path(fixtures_dir, entry.id).read_text(encoding="utf-8")
-        )
+        path = fixture_path(fixtures_dir, entry.id)
+        if not path.is_file():
+            # A source with no recording is one this run cannot replay (no plugin, or nobody
+            # recorded it). `restore_budgets` asks for a clock for every pending source, so being
+            # strict here would make an offline run fail on a source it was never going to call.
+            # A fixture miss during an actual fetch still raises loudly — that is the one that
+            # means the recording is incomplete.
+            return SystemClock()
+        payload = json.loads(path.read_text(encoding="utf-8"))
         stamp = datetime.fromisoformat(str(payload["recorded_at"]))
         return FixedClock(stamp.astimezone(UTC))
 
