@@ -48,8 +48,12 @@ TA_MIGRATION_TRACE=1 uv run alembic upgrade head   # where did a migration stop?
 # After a schema change: uv run alembic revision --autogenerate -m "what changed"
 # Then ALWAYS: upgrade -> check -> downgrade base -> upgrade (the round trip)
 
-# Run a pipeline layer from a checkpoint (P1+)
-uv run python -m trend_analyst.pipeline.orchestrator --layers L0 --resume
+# Run L0 (resumes a crashed run automatically; one source failing never stops the rest)
+uv run python -m trend_analyst.pipeline.orchestrator --layers L0
+uv run python -m trend_analyst.pipeline.orchestrator --json            # machine-readable
+uv run python -m trend_analyst.pipeline.orchestrator --dry-run         # fetch and parse, write nothing
+uv run python -m trend_analyst.pipeline.orchestrator --limit 1         # crash drill: leave a run open
+uv run python -m trend_analyst.pipeline.orchestrator --fixtures tests/data   # offline replay, no network
 ```
 
 ## 2. Project structure and stack

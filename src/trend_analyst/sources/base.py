@@ -47,6 +47,7 @@ __all__ = [
     "Clock",
     "Decision",
     "FetchContext",
+    "FixedClock",
     "HttpClient",
     "HttpResponse",
     "PluginContractError",
@@ -117,6 +118,34 @@ class SystemClock:
 
     def now(self) -> datetime:
         return datetime.now(UTC)
+
+
+class FixedClock:
+    """A pinned clock, for offline replays and deterministic tests.
+
+    Wall time does not move: a replay must request exactly the URLs that were recorded, and
+    several collectors derive those URLs from the date (Wikipedia's days, Arctic Shift's
+    ``after=``). If time drifted, a replay would ask for days nobody recorded — correctly,
+    but uselessly.
+
+    Monotonic time, on the other hand, advances a second per read. That is deliberate: it
+    is only used for rate limiting, and a clock that never moves would make a polite
+    collector refuse its own requests for lack of elapsed time. The result is a replay that
+    behaves as if the run took its time, without waiting for it.
+    """
+
+    def __init__(self, now: datetime, *, seconds_per_read: float = 1.0) -> None:
+        self._now = now
+        self._monotonic = 0.0
+        self._step = seconds_per_read
+
+    def monotonic(self) -> float:
+        current = self._monotonic
+        self._monotonic += self._step
+        return current
+
+    def now(self) -> datetime:
+        return self._now
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,6 +513,18 @@ class SourceBudget:
     def reset_day(self) -> None:
         """Start a new day: the budget refills, the rate limiter keeps its phase."""
         self._spent = 0
+
+    def charge(self, spent: int) -> None:
+        """Rehydrate today's spend from the ledger (spec §5.4).
+
+        A resumed run must continue from what was already spent, not from zero — otherwise
+        a crash becomes a way to spend the daily budget twice. Charging more than the
+        budget is allowed and simply means the source is exhausted; refusing would lose
+        the fact.
+        """
+        if spent < 0:
+            raise ValueError("spent cannot be negative")
+        self._spent = spent
 
     def snapshot(self) -> QuotaSnapshot:
         remaining_backoff = self.backoff_remaining_s()

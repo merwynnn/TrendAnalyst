@@ -1,10 +1,691 @@
-"""Orchestrates a run: L0 -> L1 -> L2 -> L3, checkpointing after every layer.
+"""L0 collection: run every enabled L0 source, in registry order, resumably (spec §2, §5).
 
-STUB — implemented in phase P1. This module exports nothing and does nothing on
-purpose: a later phase fills it in. It exists so the repository matches the layout the
-spec mandates (section 3) and so imports stay stable.
+The loop is deliberately dull — deterministic code, checkpoints, no agent framework:
+
+for each enabled L0 source, in the order config/sources.yaml lists them:
+    leash -> fetch -> dedup by content hash -> parse -> store -> watermark -> ledger
+
+Four properties are the reason this file exists:
+
+1. **File order is execution order** (spec §4.2). The registry decides; nothing here has
+   an opinion about which source matters.
+2. **A source that fails does not stop the run** (§4.3). Its failure is recorded with the
+   reason and the loop continues, because one dead endpoint must not cost a night's data.
+3. **Identical payloads are not parsed twice** (§5.2). The content hash decides, and the
+   ledger records zero new items — which is what makes a second run cheap.
+4. **A resume executes only unfinished work** (§5.4). "Finished" is a query against the
+   ledger, so it survives a crash: `run_l0()` after `run_l0()` picks up where it stopped.
+
+Quota spend is written to `quota_ledger` under a compare-and-swap key per (run, source),
+so re-running a source — exactly what a resume does — cannot charge it twice.
 """
 
 from __future__ import annotations
 
-STUB_PHASE = "P1"
+import argparse
+import json
+import sys
+from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy import Engine, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import Session, sessionmaker
+
+from config.settings import ConfigError, default_config_dir, load_settings
+from trend_analyst.logging import configure_logging, get_logger, log_event
+from trend_analyst.net import (
+    EgressDeniedError,
+    HttpFetchError,
+    HttpPolicy,
+    HttpxClient,
+    RecordedHttpClient,
+    fixture_path,
+)
+from trend_analyst.pipeline.state import (
+    RunHandle,
+    advance_watermark,
+    finish_run,
+    pending_sources,
+    read_watermark,
+    record_source_result,
+    record_spend,
+    restore_budgets,
+    spent_today,
+    start_run,
+)
+from trend_analyst.sources.base import (
+    HTTP_CLIENT_ERROR,
+    FetchContext,
+    FixedClock,
+    PluginContractError,
+    RawBatch,
+    SourceBudget,
+    SourcePlugin,
+    SourceSkippedError,
+    SystemClock,
+    load_plugin,
+)
+from trend_analyst.sources.registry import (
+    Registry,
+    SourceEntry,
+    default_registry_path,
+    load_registry,
+)
+from trend_analyst.store.db import (
+    DatabaseNotConfiguredError,
+    create_db_engine,
+    create_session_factory,
+)
+from trend_analyst.store.models import RawItem, SignalRow
+from trend_analyst.store.sync import sync_sources
+
+__all__ = ["RunReport", "SourceOutcome", "collect_one", "run_l0"]
+
+log = get_logger("pipeline.orchestrator")
+
+#: How many of the newest signals in a batch are considered "new" when the same payload
+#: arrives twice. The dedup key in the database is what actually prevents duplicates.
+_MAX_PARTS_IN_REF = 64
+
+
+@dataclass(frozen=True, slots=True)
+class SourceOutcome:
+    """What happened to one source in one run — the ledger row, in memory."""
+
+    source_id: str
+    status: str
+    items_fetched: int = 0
+    items_new: int = 0
+    signals_parsed: int = 0
+    quota_spent: int = 0
+    rate_limit_hits: int = 0
+    not_modified: bool = False
+    reason: str | None = None
+
+    @property
+    def deduplicated(self) -> bool:
+        return self.not_modified or (self.items_fetched > 0 and self.signals_parsed == 0)
+
+
+@dataclass(frozen=True, slots=True)
+class RunReport:
+    """The run's outcome, in the shape the CLI prints and the tests assert on."""
+
+    run_id: str
+    resumed: bool
+    status: str
+    outcomes: tuple[SourceOutcome, ...]
+
+    @property
+    def items_new(self) -> int:
+        return sum(outcome.items_new for outcome in self.outcomes)
+
+    @property
+    def signals_parsed(self) -> int:
+        return sum(outcome.signals_parsed for outcome in self.outcomes)
+
+    @property
+    def quota_spent(self) -> int:
+        return sum(outcome.quota_spent for outcome in self.outcomes)
+
+    def by_id(self, source_id: str) -> SourceOutcome:
+        for outcome in self.outcomes:
+            if outcome.source_id == source_id:
+                return outcome
+        raise KeyError(source_id)
+
+    def summary(self) -> dict[str, Any]:
+        counts: dict[str, int] = {}
+        for outcome in self.outcomes:
+            counts[outcome.status] = counts.get(outcome.status, 0) + 1
+        return {
+            "run_id": self.run_id,
+            "resumed": self.resumed,
+            "status": self.status,
+            "sources": counts,
+            "items_new": self.items_new,
+            "signals_parsed": self.signals_parsed,
+            "quota_spent": self.quota_spent,
+        }
+
+    def render(self) -> str:
+        lines = [
+            f"L0 run {self.run_id} — {self.status}"
+            + (" (resumed)" if self.resumed else ""),
+            f"  sources: {len(self.outcomes)} · new signals: {self.items_new} · "
+            f"parsed: {self.signals_parsed} · requests: {self.quota_spent}",
+        ]
+        for outcome in self.outcomes:
+            detail = f" ({outcome.reason})" if outcome.reason else ""
+            flag = "not-modified" if outcome.not_modified else f"{outcome.items_new} new"
+            lines.append(
+                f"  {outcome.source_id:<22} {outcome.status:<9} "
+                f"items={outcome.items_fetched:<3} {flag:<13} "
+                f"requests={outcome.quota_spent}{detail}"
+            )
+        return "\n".join(lines)
+
+
+def _latest_hash(session: Session, source_id: str) -> str | None:
+    """The content hash of the most recent payload stored for a source (spec §5.2)."""
+    return session.execute(
+        select(RawItem.content_hash)
+        .where(RawItem.source_id == source_id)
+        .order_by(RawItem.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def _store_raw(session: Session, *, run_id: str, batch: RawBatch) -> None:
+    """Keep a *reference* to the payload, never the payload (brief §4: state stores
+    references and hashes, never blobs). The signals are the extracted data; the lake
+    keeps what is needed to know it was seen, and expires after 90 days (spec §5.4)."""
+    session.add(
+        RawItem(
+            source_id=batch.source_id,
+            run_id=run_id,
+            fetched_at=batch.fetched_at,
+            content_hash=batch.content_hash,
+            cursor=batch.cursor,
+            byte_size=batch.byte_size,
+            payload={
+                "parts": min(batch.item_count, _MAX_PARTS_IN_REF),
+                "statuses": list(batch.status_codes[: _MAX_PARTS_IN_REF]),
+                "requests": batch.request_count,
+            },
+        )
+    )
+
+
+def _store_signals(session: Session, signals: Sequence[Any]) -> int:
+    """Insert signals, ignoring ones already known. Returns how many were new.
+
+    The unique key (source, entity, metric, ts) makes this idempotent, so a resumed or
+    repeated run cannot inflate the lake with duplicates of the same fact.
+    """
+    if not signals:
+        return 0
+    rows = [
+        {
+            "source_id": signal.source_id,
+            "entity": signal.entity,
+            "metric": signal.metric,
+            "value": signal.value,
+            "ts": signal.ts,
+            "category": signal.category,
+            "url": signal.url,
+            "quote": signal.quote,
+            "raw_hash": None,
+            "metadata": dict(signal.metadata),
+        }
+        for signal in signals
+    ]
+    # RETURNING, not rowcount: for INSERT..ON CONFLICT DO NOTHING psycopg reports -1 as
+    # the row count, which would report "-1 new signals" — a silent lie about the work done.
+    signals_table = SignalRow.metadata.tables["signals"]
+    statement = (
+        pg_insert(signals_table)
+        .values(rows)
+        .on_conflict_do_nothing(index_elements=["source_id", "entity", "metric", "ts"])
+        .returning(signals_table.c.id)
+    )
+    return len(session.execute(statement).scalars().all())
+
+
+def collect_one(  # noqa: PLR0911 — one return per outcome is clearer than a status variable
+    session: Session,
+    *,
+    entry: SourceEntry,
+    run_id: str,
+    plugin: SourcePlugin,
+    client: Any,
+    budget: SourceBudget,
+    clock: Any,
+    previously_spent: int,
+    max_items: int | None = None,
+    dry_run: bool = False,
+) -> SourceOutcome:
+    """Fetch and store one source. Never raises for a source-level problem."""
+    cursor = read_watermark(session, entry.id)
+    ctx = FetchContext(
+        run_id=run_id,
+        source_id=entry.id,
+        client=client,
+        budget=budget,
+        clock=clock,
+        cursor=cursor,
+        max_items=max_items,
+    )
+
+    try:
+        batch = plugin.fetch(ctx)
+    except SourceSkippedError as exc:
+        return SourceOutcome(
+            source_id=entry.id,
+            status="skipped",
+            quota_spent=budget.spent_today - previously_spent,
+            rate_limit_hits=budget.rate_limit_hits,
+            reason=str(exc),
+        )
+    except HttpFetchError as exc:
+        return SourceOutcome(
+            source_id=entry.id,
+            status="failed",
+            quota_spent=budget.spent_today - previously_spent,
+            rate_limit_hits=budget.rate_limit_hits,
+            reason=str(exc),
+        )
+    except EgressDeniedError as exc:  # a plugin bug, and a loud one
+        return SourceOutcome(
+            source_id=entry.id,
+            status="failed",
+            reason=f"egress denied: {exc}",
+        )
+
+    spent = budget.spent_today - previously_spent
+    hits = budget.rate_limit_hits
+
+    if batch.not_modified:
+        if not dry_run:
+            advance_watermark(session, entry.id, batch.cursor)
+        return SourceOutcome(
+            source_id=entry.id,
+            status="ok",
+            quota_spent=spent,
+            rate_limit_hits=hits,
+            not_modified=True,
+            reason="the source reports nothing new since the watermark",
+        )
+
+    if not batch.parts:
+        return SourceOutcome(
+            source_id=entry.id,
+            status="degraded",
+            quota_spent=spent,
+            rate_limit_hits=hits,
+            reason="the source returned no payloads",
+        )
+
+    stored_hash = _latest_hash(session, entry.id)
+    if batch.is_unchanged_since(stored_hash):
+        if not dry_run:
+            advance_watermark(session, entry.id, batch.cursor)
+        return SourceOutcome(
+            source_id=entry.id,
+            status="ok",
+            quota_spent=spent,
+            rate_limit_hits=hits,
+            items_fetched=batch.item_count,
+            reason="identical payload hash: parsing, scoring and the LLM are skipped (spec §5.2)",
+        )
+
+    signals = plugin.parse(batch)
+    if dry_run:
+        # A dry run does the work and reports it, but writes nothing at all — no lake row,
+        # no signals, no watermark. `items_new` is what a real run would have stored.
+        return SourceOutcome(
+            source_id=entry.id,
+            status="ok",
+            quota_spent=spent,
+            rate_limit_hits=hits,
+            items_fetched=batch.item_count,
+            items_new=len(signals),
+            signals_parsed=len(signals),
+            reason="dry run: nothing written",
+        )
+
+    _store_raw(session, run_id=run_id, batch=batch)
+    new_signals = _store_signals(session, signals)
+    advance_watermark(session, entry.id, batch.cursor)
+
+    degraded = any(code >= HTTP_CLIENT_ERROR for code in batch.status_codes) or hits > 0
+    return SourceOutcome(
+        source_id=entry.id,
+        status="degraded" if degraded else "ok",
+        quota_spent=spent,
+        rate_limit_hits=hits,
+        items_fetched=batch.item_count,
+        items_new=new_signals,
+        signals_parsed=len(signals),
+        reason="some requests were refused" if degraded else None,
+    )
+
+
+def _record_outcome(
+    session: Session, *, run_id: str, outcome: SourceOutcome, operation: str
+) -> None:
+    """Persist one outcome: quota first (CAS), then the ledger row."""
+    if outcome.quota_spent > 0:
+        recorded = record_spend(
+            session,
+            source_id=outcome.source_id,
+            run_id=run_id,
+            operation=operation,
+            amount=outcome.quota_spent,
+            reason=outcome.status,
+        )
+        if not recorded:
+            log_event(
+                log,
+                "quota.already_recorded",
+                source_id=outcome.source_id,
+                run_id=run_id,
+                note="a resumed run re-issued a spend that is already in the ledger",
+            )
+    record_source_result(
+        session,
+        run_id=run_id,
+        source_id=outcome.source_id,
+        status=outcome.status,
+        items_fetched=outcome.items_fetched,
+        items_new=outcome.items_new,
+        quota_spent=outcome.quota_spent,
+        rate_limit_hits=outcome.rate_limit_hits,
+        reason=outcome.reason,
+    )
+
+
+def run_l0(
+    *,
+    registry: Registry,
+    sessions: sessionmaker[Session],
+    client_for: Callable[[SourceEntry], Any],
+    engine: Engine | None = None,
+    runner: Callable[[SourceEntry], SourcePlugin] | None = None,
+    clock_for: Callable[[SourceEntry], Any] | None = None,
+    max_items_for: Callable[[SourceEntry], int | None] | None = None,
+    trigger: str = "nightly",
+    resume: bool = True,
+    source_ids: Sequence[str] | None = None,
+    max_sources: int | None = None,
+    dry_run: bool = False,
+) -> RunReport:
+    """Run L0 for every enabled L0 source (or the requested subset), in registry order.
+
+    Args:
+        sessions: session factory.
+        client_for: builds the HTTP client for a source. Tests pass a fixture-replaying
+            factory; production passes the allowlist-enforcing httpx client.
+        runner: plugin loader; defaults to `load_plugin`.
+        max_sources: stop after N sources without closing the run — how a crash is
+            simulated, and how a partially-completed run is left behind on purpose.
+        dry_run: do the work but write nothing (no lake rows, no ledger, no watermark).
+    """
+    make_clock = clock_for or (lambda _entry: SystemClock())
+    load = runner or load_plugin
+
+    with sessions() as session:
+        # A watermark lives on the source's row, so the registry mirror must exist before
+        # anything can be resumed. The sync never touches watermarks, so this is safe to
+        # run every time.
+        sync_sources(session, registry)
+        handle: RunHandle = start_run(session, trigger=trigger, resume=resume)
+        session.commit()
+        pending = pending_sources(session, handle.run_id, registry)
+        if source_ids is not None:
+            wanted = set(source_ids)
+            pending = tuple(source_id for source_id in pending if source_id in wanted)
+        if max_sources is not None:
+            pending = pending[:max_sources]
+
+        budgets = restore_budgets(
+            session, registry, source_ids=pending, clock_for=make_clock
+        )
+        outcomes: list[SourceOutcome] = []
+
+        for source_id in pending:
+            entry = registry.by_id(source_id)
+            budget = budgets[source_id]
+            try:
+                plugin = load(entry)
+            except PluginContractError as exc:
+                # A collector that has not been written yet is not a crash: it is a source
+                # this phase does not cover, recorded as skipped with the reason why.
+                outcome = SourceOutcome(
+                    source_id=source_id,
+                    status="skipped",
+                    reason=f"no plugin yet: {exc}",
+                )
+                outcomes.append(outcome)
+                if not dry_run:
+                    _record_outcome(
+                        session, run_id=handle.run_id, outcome=outcome, operation=f"l0:{source_id}"
+                    )
+                    session.commit()
+                continue
+            spent_before = spent_today(session, source_id)
+
+            outcome = collect_one(
+                session,
+                entry=entry,
+                run_id=handle.run_id,
+                plugin=plugin,
+                client=client_for(entry),
+                budget=budget,
+                clock=make_clock(entry),
+                previously_spent=spent_before,
+                max_items=max_items_for(entry) if max_items_for else None,
+                dry_run=dry_run,
+            )
+            outcomes.append(outcome)
+            log_event(
+                log,
+                "source.collected",
+                run_id=handle.run_id,
+                source_id=source_id,
+                status=outcome.status,
+                items_new=outcome.items_new,
+            )
+
+            if not dry_run:
+                _record_outcome(
+                    session, run_id=handle.run_id, outcome=outcome, operation=f"l0:{source_id}"
+                )
+                session.commit()
+
+        if max_sources is None and not dry_run:
+            status = _run_status(outcomes, registry, handle)
+            finish_run(
+                session,
+                handle.run_id,
+                status=status,
+                layer_status={
+                    "L0": {
+                        "status": status,
+                        "items": sum(outcome.items_fetched for outcome in outcomes),
+                        "sources": {outcome.source_id: outcome.status for outcome in outcomes},
+                    }
+                },
+            )
+            session.commit()
+        elif dry_run:
+            status = _run_status(outcomes, registry, handle)
+        else:
+            status = "partial"
+
+        return RunReport(
+            run_id=handle.run_id,
+            resumed=handle.resumed,
+            status=status,
+            outcomes=tuple(outcomes),
+        )
+
+
+def _run_status(outcomes: Sequence[SourceOutcome], registry: Registry, handle: RunHandle) -> str:
+    """One word for the run: how badly did it go?
+
+    A failed source degrades a run that otherwise worked, and fails a run that did not —
+    "everything is broken" and "one endpoint is down" must not read the same to the monitor
+    agent (spec §9).
+    """
+    failed = sum(1 for outcome in outcomes if outcome.status == "failed")
+    succeeded = sum(1 for outcome in outcomes if outcome.status == "ok")
+    other = len(outcomes) - failed - succeeded
+
+    if not outcomes:
+        # A resumed run whose work was already done is a success, not a failure.
+        return "ok" if handle.resumed else "degraded"
+    if failed == 0 and other == 0:
+        return "ok"
+    if failed == len(outcomes):
+        return "failed"
+    if failed or other:
+        return "degraded"
+    return "ok"
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def _client_factory(
+    *, registry: Registry, fixtures_dir: Path | None, timeout_s: float
+) -> Callable[[SourceEntry], Any]:
+    if fixtures_dir is not None:
+        def replay(entry: SourceEntry) -> Any:
+            return RecordedHttpClient.from_path(
+                fixture_path(fixtures_dir, entry.id), allowed_domains=entry.domains
+            )
+
+        return replay
+
+    def live(entry: SourceEntry) -> Any:
+        return HttpxClient(
+            source_id=entry.id,
+            allowed_domains=entry.domains,
+            policy=HttpPolicy(timeout_s=timeout_s),
+        )
+
+    return live
+
+
+def _clock_factory(
+    *, fixtures_dir: Path | None
+) -> Callable[[SourceEntry], Any]:
+    """A real clock, or — when replaying fixtures — the time they were recorded at."""
+    if fixtures_dir is None:
+        return lambda _entry: SystemClock()
+
+    def recorded(entry: SourceEntry) -> Any:
+        payload = json.loads(
+            fixture_path(fixtures_dir, entry.id).read_text(encoding="utf-8")
+        )
+        stamp = datetime.fromisoformat(str(payload["recorded_at"]))
+        return FixedClock(stamp.astimezone(UTC))
+
+    return recorded
+
+
+def _limits_factory(*, fixtures_dir: Path | None) -> Callable[[SourceEntry], int | None] | None:
+    """In replay mode, honour the item limit the fixture was recorded with.
+
+    A replay that asked for more items than were recorded would request URLs nobody
+    fetched — the plugin derives its requests from this limit, so the replay must use the
+    recorded one.
+    """
+    if fixtures_dir is None:
+        return None
+
+    def recorded_limit(entry: SourceEntry) -> int | None:
+        payload = json.loads(
+            fixture_path(fixtures_dir, entry.id).read_text(encoding="utf-8")
+        )
+        value = payload.get("max_items")
+        return int(value) if value is not None else None
+
+    return recorded_limit
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m trend_analyst.pipeline.orchestrator",
+        description="Run the L0 collection layer (spec §2).",
+    )
+    parser.add_argument("--layers", default="L0", help="layers to run (only L0 exists in P1)")
+    parser.add_argument("--source", action="append", default=[], help="limit to these source ids")
+    parser.add_argument(
+        "--limit", type=int, default=None, help="stop after N sources (crash drill)"
+    )
+    parser.add_argument("--no-resume", action="store_true", help="always start a new run")
+    parser.add_argument("--dry-run", action="store_true", help="do not write anything")
+    parser.add_argument(
+        "--fixtures",
+        default=None,
+        metavar="DIR",
+        help="replay recorded fixtures from DIR instead of the network",
+    )
+    parser.add_argument("--config-dir", default=None, help="directory holding sources.yaml")
+    parser.add_argument("--json", action="store_true", help="machine-readable report")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    if args.layers != "L0":
+        print(
+            f"only L0 exists in P1 (asked for {args.layers!r}); L1-L3 land in P2-P4",
+            file=sys.stderr,
+        )
+        return 1
+
+    config_dir = Path(args.config_dir) if args.config_dir else default_config_dir()
+    try:
+        settings = load_settings(config_dir)
+        registry = load_registry(default_registry_path(config_dir))
+    except (ConfigError, Exception) as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
+        return 1
+
+    configure_logging(
+        level=settings.app.log_level,
+        json_output=settings.app.log_json,
+    )
+
+    try:
+        engine = create_db_engine(settings) if settings.db.configured else None
+    except DatabaseNotConfiguredError as exc:
+        print(f"database not configured: {exc}", file=sys.stderr)
+        return 1
+    if engine is None:
+        print("database not configured: run scripts/provision_pg.sh", file=sys.stderr)
+        return 1
+
+    report = run_l0(
+        registry=registry,
+        sessions=create_session_factory(engine),
+        engine=engine,
+        client_for=_client_factory(
+            registry=registry,
+            fixtures_dir=Path(args.fixtures) if args.fixtures else None,
+            timeout_s=30.0,
+        ),
+        clock_for=_clock_factory(
+            fixtures_dir=Path(args.fixtures) if args.fixtures else None
+        ),
+        max_items_for=_limits_factory(
+            fixtures_dir=Path(args.fixtures) if args.fixtures else None
+        ),
+        trigger="manual",
+        resume=not args.no_resume,
+        source_ids=args.source or None,
+        max_sources=args.limit,
+        dry_run=args.dry_run,
+    )
+    engine.dispose()
+
+    if args.json:
+        payload = {
+            **report.summary(),
+            "outcomes": [asdict(outcome) for outcome in report.outcomes],
+        }
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        print(report.render())
+    return 0 if report.status in {"ok", "partial"} else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

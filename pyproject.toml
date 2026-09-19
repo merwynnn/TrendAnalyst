@@ -86,6 +86,7 @@ ignore = [
 "**/cli.py" = ["T201"]
 "scripts/**" = ["T201"]
 "src/trend_analyst/monitor/health.py" = ["T201"]
+"src/trend_analyst/pipeline/orchestrator.py" = ["T201"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["trend_analyst", "config"]

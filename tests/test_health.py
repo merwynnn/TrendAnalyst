@@ -453,8 +453,18 @@ def test_eval_baseline_is_reported(seeded_session: Session, repo_root: Path) -> 
 
 @pytest.mark.db
 def test_cli_json_output_on_an_empty_database(
-    db_engine: Engine, repo_root: Path, capsys: pytest.CaptureFixture[str]
+    db_url: str,
+    repo_root: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The CLI path end to end, against the isolated test database.
+
+    The DSN is overridden rather than inherited: a test that reads the developer's database
+    is a test that fails the moment a real run has happened (and it did).
+    """
+    monkeypatch.setenv("TA_DB__URL", db_url)
+
     exit_code = main(
         [
             "--config-dir",

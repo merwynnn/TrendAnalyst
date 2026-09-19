@@ -13,12 +13,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from scripts.sync_sources import REGISTRY_OWNED_COLUMNS, sync_sources
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from trend_analyst.sources.registry import default_registry_path, load_registry
 from trend_analyst.store.models import Source
+from trend_analyst.store.sync import REGISTRY_OWNED_COLUMNS, sync_sources
 
 pytestmark = pytest.mark.db
 

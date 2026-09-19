@@ -116,6 +116,41 @@ PY
 }
 check "source registry — catalog, execution order, Tier-A never in L0" registry_probe
 
+# --- L0 collection, replayed from the recorded fixtures (P1) ------------------
+l0_replay_probe() {
+  uv run python - <<'PY'
+import json
+import subprocess
+import sys
+
+SOURCES = ["--source", "hn_firebase", "--source", "wiki_pageviews", "--source", "arctic_shift"]
+
+def run() -> dict:
+    out = subprocess.run(
+        [sys.executable, "-m", "trend_analyst.pipeline.orchestrator",
+         "--fixtures", "tests/data", "--json", *SOURCES],
+        capture_output=True, text=True, check=True,
+    )
+    return json.loads(out.stdout)
+
+first = run()
+second = run()
+print(f"run 1: status={first['status']} signals={first['items_new']} "
+      f"requests={first['quota_spent']}")
+print(f"run 2: status={second['status']} signals={second['items_new']} "
+      f"requests={second['quota_spent']}")
+for outcome in second["outcomes"]:
+    print(f"  {outcome['source_id']:<20} {outcome['status']:<8} "
+          f"new={outcome['items_new']:<4} parsed={outcome['signals_parsed']:<4} "
+          f"requests={outcome['quota_spent']}")
+assert second["items_new"] == 0, "a repeated L0 run must store no new signals"
+assert all(o["signals_parsed"] == 0 for o in second["outcomes"]), (
+    "a repeated L0 run must not re-parse identical payloads"
+)
+PY
+}
+check "L0 replay — repeated run stores and parses nothing new" l0_replay_probe
+
 # --- registry → database sync (P0-T6) -----------------------------------------
 if uv run python -c "
 import socket, sys
@@ -147,14 +182,33 @@ else
   pending "pytest — full suite" "no Postgres reachable on 127.0.0.1:5432 (run: wsl -d Ubuntu -u root -- bash scripts/provision_pg.sh)" uv run pytest -q
 fi
 
-# --- needs the health CLI (P0-T7) -------------------------------------------
-if grep -q 'STUB_PHASE = "P0-T7"' src/trend_analyst/monitor/health.py 2>/dev/null; then
-  pending "health CLI — empty-but-healthy" "the health CLI is implemented in bean P0-T7" \
-    uv run python -m trend_analyst.health
-else
-  check "health CLI — empty-but-healthy (exit 0)" uv run python -m trend_analyst.health --json
-fi
+# --- health (P0-T7) ------------------------------------------------------------
+# The CLI's contract is checked here; the *state* it reports (empty-but-healthy) is
+# asserted in the test suite against the isolated database, because the development
+# database legitimately accumulates real runs.
+health_probe() {
+  uv run python - <<'PY'
+import json
+import subprocess
+import sys
 
+out = subprocess.run(
+    [sys.executable, "-m", "trend_analyst.health", "--json"],
+    capture_output=True,
+    text=True,
+    check=False,
+)
+payload = json.loads(out.stdout)
+status = payload["status"]
+expected = {"healthy": 0, "degraded": 1, "down": 2}[status]
+print(f"status: {status} (exit {out.returncode}, expected {expected})")
+print(f"database: {'ok' if payload['database']['ok'] else 'DOWN'}")
+print(f"sources: {len(payload['sources'])} · reasons: {payload.get('reasons')}")
+assert out.returncode == expected, f"exit code must match the status ({status})"
+assert payload["database"]["ok"], "the database must be reachable for this check"
+PY
+}
+check "health CLI — valid report, exit code matches status" health_probe
 # --- summary -----------------------------------------------------------------
 header "Summary"
 if [ "$failures" -eq 0 ]; then

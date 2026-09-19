@@ -18,14 +18,14 @@ Judge, Writer) with hard budgets.
 | Phase | Scope | State |
 |---|---|---|
 | **P0** | Skeleton, layered config, `sources.yaml` registry (+Tier-A-in-L0 hard-fail), Postgres models + first migration, health CLI | **done** — see [`docs/evidence/P0.md`](docs/evidence/P0.md) (outcome) and [`P0-gate.md`](docs/evidence/P0-gate.md) (raw gate output) |
-| P1 | L0 collectors (HN, Wikipedia, one more Tier-S) + run ledger, watermarks, content-hash dedup | not started |
+| **P1** | L0 collectors (HN, Wikipedia, Arctic Shift) + run ledger, watermarks, content-hash dedup, kill-and-resume | **done** — see [`docs/evidence/P1.md`](docs/evidence/P1.md) (outcome) and [`P1-gate.md`](docs/evidence/P1-gate.md) (raw gate output) |
 | P2 | L1 mining + scoring v1 (MGS, fad features, Monte Carlo revenue) | not started |
 | P3 | LLM gates, gateway, cache | not started |
 | P4 | L2 enrichment, briefs, snapshots, TTL jobs | not started |
 | P5 | AGENT.md + USER_SETUP.md to bar, 50 golden evals, CI, monitor dry-run | not started |
 
-Gate: `bash scripts/gate.sh` — 11 checks, currently **PASS (0 pending)**. Run it after any
-change; it regenerates `docs/evidence/P0-gate.md` with raw output instead of a claim.
+Gate: `bash scripts/gate.sh` — 12 checks, currently **PASS (0 pending)**. Run it after any
+change; it regenerates `docs/evidence/P1-gate.md` with raw output instead of a claim.
 
 Task tracking lives in `beans` (`.beans/`), not in this file: `beans list --ready`.
 
@@ -108,6 +108,8 @@ decision the human approved or an addition the spec layout does not name.
 | D5 | Dossiers moved from the repo root to `docs/dossiers/` | Spec §3: "nothing ad-hoc at root". |
 | D6 | `config/secrets.local.yaml` is the credential store (env vars remain an optional override) | Human instruction B4: "don't put the api keys on environment variable, let them in a file". Spec §10 allows either. |
 | D7 | Postgres runs in WSL (Ubuntu 26.04, PG 18 + pgvector) and is held up by `scripts/db_up.sh` | Human decision B1a. WSL terminates idle distros (measured), so a parked `sleep infinity` keeps it reachable — the alternative, a native Windows build, cannot install pgvector without an MSVC toolchain. |
+| D9 | `src/trend_analyst/net.py` — the HTTP client, egress allowlist and fixture replay | The spec layout has no home for network plumbing; plugins must not choose their own transport (spec §10) |
+| D10 | `src/trend_analyst/store/sync.py` — registry mirror logic moved out of `scripts/` | The orchestrator needs it before a run (a watermark lives on the source row), and `src/` must not import from `scripts/` |
 | D8 | The DSN uses `127.0.0.1`, never `localhost` | On Windows `localhost` resolves to IPv6 `::1` FIRST, and WSL's port relay black-holes `::1`: every connection then burned 130 s before falling back to IPv4 (measured: 130.09 s as `localhost`, 0.06 s as `127.0.0.1`). Same reason `migrations/env.py` sets `connect_timeout` and `lock_timeout` — a migration must fail fast, never hang. |
 
 ## Rules of the road
