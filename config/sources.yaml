@@ -1,0 +1,27 @@
+# ---------------------------------------------------------------------------
+# Trend Analyst — source registry (spec §4.2 / §4.3).
+#
+# Normative semantics, enforced in code by trend_analyst.sources.registry:
+#
+#   * FILE ORDER IS EXECUTION ORDER. The orchestrator iterates enabled sources in
+#     the order they appear here — the catalog below is kept in the appendix-A
+#     ranking order (Tier S first, then Tier A).
+#   * A Tier-A (or any non-Tier-S) source declaring layer L0 is a HARD STARTUP
+#     FAILURE. Tier A spends quota, L0 runs broad and cheap, and the two must
+#     never mix.
+#   * `enabled: false` removes a source from runs without deleting its module
+#     (spec §4.3 lifecycle: keep the module for 30 days before deleting).
+#   * `budget_per_day` is enforced by a central token bucket per source id, never
+#     by a prompt. On HTTP 429 a plugin MUST back off and record `quota_spend`;
+#     the run continues without that source.
+#   * `domains` is the network egress allowlist for that plugin (spec §10): a
+#     source may only call domains it declares here.
+#
+# TODO(P0-T3): the full appendix-A catalog lands here — 15 Tier-S entries (enabled)
+# and 7 Tier-A entries (disabled until their credential exists). An EMPTY registry
+# is a hard error: the loader refuses to start rather than silently scanning nothing.
+# ---------------------------------------------------------------------------
+
+version: 1
+
+sources: {}

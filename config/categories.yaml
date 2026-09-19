@@ -1,0 +1,14 @@
+# ---------------------------------------------------------------------------
+# Trend Analyst — category taxonomy (spec §6.1).
+#
+# Scores are per-category percentiles, so every candidate must resolve to exactly
+# one category. `keywords` seeds the L1 phrase classifier and `price_band` feeds
+# the Money sub-score (MP) and the revenue Monte Carlo.
+#
+# TODO(P2): the real taxonomy is authored together with the L1 miner — it must be
+# derived from what the L0 sources actually produce, not invented up front.
+# ---------------------------------------------------------------------------
+
+version: 1
+
+categories: []

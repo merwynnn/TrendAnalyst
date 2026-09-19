@@ -1,0 +1,106 @@
+# AGENT.md — operating manual for the monitor agent
+
+> **Bar:** brief §5. Sections marked `TODO(P5)` are completed in phase P5, after the
+> runbooks they describe actually exist. This file describes reality, not wishes.
+
+## 1. Commands (run these first, in this order)
+
+```bash
+# Health — ALWAYS the first command. Reads the health CLI, never raw logs.
+uv run python -m trend_analyst.health            # human view
+uv run python -m trend_analyst.health --json      # machine view (parse this)
+echo $?                                           # 0 healthy / 1 degraded / 2 down
+
+# What was I doing / what is left
+beans list --json --ready
+beans show <bean-id>
+
+# Gates (must all pass before you report a change as done)
+uv run pytest -m "not db"     # no database needed
+uv run pytest                 # full suite, needs local Postgres
+uv run ruff check .
+uv run mypy src config
+
+# Local Postgres (WSL) up / down
+wsl -d Ubuntu -u root -- pg_ctlcluster 18 main start
+wsl -d Ubuntu -u root -- pg_ctlcluster 18 main status
+wsl -d Ubuntu -u root -- bash scripts/provision_pg.sh    # idempotent re-provision
+
+# Migrations
+uv run alembic upgrade head
+uv run alembic check          # zero drift between models and migrations
+uv run alembic downgrade -1
+
+# Run a pipeline layer from a checkpoint (P1+)
+uv run python -m trend_analyst.pipeline.orchestrator --layers L0 --resume
+```
+
+## 2. Project structure and stack
+
+```
+config/            settings.py (layered config), sources.yaml (registry = execution order),
+                   categories.yaml, secrets.local.yaml (UNTRACKED — never read it into a log)
+src/trend_analyst/ pipeline/ (orchestrator, layers/, state) · sources/ (base, registry, tier_s/, tier_a/)
+                   scoring/ (features, normalize, mgs, fad, revenue) · llm/ (gateway, cache, gates, schemas)
+                   store/ (db, models, snapshots) · monitor/ (health, alerts, drift)
+evals/             golden cases + runner        tests/  pytest (no live network)
+migrations/        alembic                     scripts/ operational scripts
+```
+
+Python (spec §11 lists 3.12; this machine runs the **system 3.14.6** — README D1) ·
+PostgreSQL 18 + pgvector (WSL) · SQLAlchemy 2 + Alembic · pydantic v2 /
+pydantic-settings · httpx · pytest + ruff + mypy --strict.
+
+Logs are structured JSON with `run_id` on every line. Alerts land in the local
+outbox file the monitor agent triages; they never leave the machine.
+
+## 3. Boundaries — what you may do alone
+
+| Tier | Contents |
+|---|---|
+| **Always do** | Read health output first; append to logs; restart a failed run from checkpoint; clear cache entries older than TTL; report exactly what you did, with the command output |
+| **Ask first** (file a proposal, then wait) | Enable/disable a source; change thresholds, weights or budgets; add a dependency; modify the CI schedule; touch migrations; anything that increases spend |
+| **Never do** | Commit secrets; delete snapshots, ledger rows or eval cases; edit `.env` or production config; force-push; bulk-delete raw lake rows; approve your own proposal |
+
+## 4. Monitor loop
+
+1. Read health (`--json`). 2. Classify: `healthy` / `degraded` / `down`.
+3. Match a runbook. 4. Act **only** within the tier above.
+5. Verify with the runbook's verification step. 6. Log the action + its rollback command.
+7. Escalate if no runbook matches, or if the action is approval-class.
+
+## 5. Runbooks
+
+`TODO(P5)` — the five required runbooks are written in P5 once each failure mode is
+reproducible against staging:
+
+1. HTTP 429 storm from a source
+2. Source approval / schema change breaking a plugin
+3. Quota burn above 80 %
+4. Judge keep-rate drift outside band
+5. Eval baseline drop
+
+Until they exist: **take no corrective action beyond the "Always do" tier.**
+
+## 6. Change classes
+
+| Class | Example | Verification step |
+|---|---|---|
+| SAFE | Restart a run from its checkpoint | Health shows the run resuming only unfinished work; no double quota spend in `quota_ledger` |
+| APPROVAL | Disable a flaky source for 7 days | Proposal filed, human approved; registry change is one revert-able commit |
+| FORBIDDEN | Editing snapshot rows to fix a bug | — (append a correction row instead) |
+
+## 7. Escalation template
+
+```
+SYMPTOM:      one line
+EVIDENCE:     the commands you ran + their output
+ATTEMPTED:    safe actions already taken (with results)
+PROPOSED:     the approval-class change, and its blast radius if ignored
+ROLLBACK:     the single command that reverses whatever you changed
+```
+
+## 8. Rollback rule
+
+Every change you make MUST be reversible with **one command**, and that command MUST
+be stated in the log line you write. If you cannot state it, you cannot make the change.

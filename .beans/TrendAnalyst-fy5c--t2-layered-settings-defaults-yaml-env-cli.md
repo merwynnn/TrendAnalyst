@@ -1,11 +1,11 @@
 ---
 # TrendAnalyst-fy5c
 title: 'T2 — Layered settings: defaults < YAML < env < CLI'
-status: todo
+status: in-progress
 type: task
 priority: high
 created_at: 2026-09-19T11:42:42Z
-updated_at: 2026-09-19T11:42:43Z
+updated_at: 2026-09-19T12:02:07Z
 parent: TrendAnalyst-l15l
 blocked_by:
     - TrendAnalyst-376u

@@ -1,0 +1,133 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "trend-analyst"
+version = "0.1.0"
+description = "Discovery and validation engine for underserved product gaps (spec: docs/dossiers/1-system-specification.pdf)"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "Louis Gambardella" }]
+classifiers = ["Private :: Do Not Upload"]
+# Dependencies are added with `uv add --bounds exact` — every direct dependency is
+# pinned exactly, and uv.lock pins the full transitive closure. "Unpinned
+# dependencies" is an explicit anti-pattern in the build brief (section 7).
+dependencies = [
+    "alembic==1.20.0",
+    "httpx==0.28.1",
+    "psycopg[binary]==3.3.6",
+    "pydantic==2.13.5",
+    "pydantic-settings==2.15.0",
+    "python-dotenv==1.2.3",
+    "pyyaml==6.0.3",
+    "sqlalchemy==2.0.54",
+    "tzdata==2026.4",
+]
+
+[project.scripts]
+ta-health = "trend_analyst.health:main"
+
+[dependency-groups]
+dev = [
+    "mypy==2.3.1",
+    "pytest==9.1.1",
+    "pytest-cov==7.1.0",
+    "ruff==0.16.8",
+    "types-pyyaml==6.0.12.20260906",
+]
+
+[tool.hatch.build.targets.wheel]
+# `config/` is shipped as a package because the spec (section 3) places
+# settings.py inside config/, not under src/ (deviation flagged: decision B2a).
+packages = ["src/trend_analyst", "config"]
+
+# ---------------------------------------------------------------------------
+# Ruff — the linter. Python 3.12 syntax target even though the runtime is the
+# system interpreter 3.14 (user instruction: do not install another Python).
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "config", "tests", "scripts", "evals"]
+extend-exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "ANN",  # flake8-annotations — "type hints on every function"
+    "B",    # flake8-bugbear
+    "A",    # flake8-builtins
+    "C4",   # flake8-comprehensions
+    "DTZ",  # flake8-datetimez — no naive datetimes in a time-series system
+    "T20",  # flake8-print — logging only, no stray prints
+    "PT",   # flake8-pytest-style
+    "SIM",  # flake8-simplify
+    "TID",  # flake8-tidy-imports
+    "PTH",  # flake8-use-pathlib
+    "ERA",  # eradicate — no commented-out code
+    "PL",   # pylint
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "ANN401",  # explicit Any is allowed only where a type is genuinely dynamic
+    "PLR0913", # a settings constructor legitimately takes many arguments
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN201", "ANN001", "PLR2004", "S101"]
+"migrations/**" = ["ANN", "ERA", "INP001"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["trend_analyst", "config"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+# ---------------------------------------------------------------------------
+# mypy — strict on new modules (spec section 11). python_version is pinned to
+# 3.12 so that 3.13+/3.14-only syntax is rejected: the codebase stays portable
+# to the spec's Python even while running on the system 3.14 interpreter.
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+warn_no_return = true
+disallow_any_generics = true
+no_implicit_reexport = true
+plugins = ["pydantic.mypy"]
+files = ["src", "config", "tests", "scripts", "evals"]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+# Tests may omit annotations on fixtures and use dynamic values.
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+[[tool.mypy.overrides]]
+module = ["alembic.*", "migrations.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# pytest — no live network, ever. `db`-marked tests need the local pgvector
+# Postgres and are deselected with `pytest -m "not db"`.
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra --strict-markers --strict-config"
+testpaths = ["tests"]
+pythonpath = [".", "src"]
+markers = [
+    "db: requires the local Postgres (WSL, pgvector). Deselect with -m 'not db'.",
+]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/trend_analyst"]

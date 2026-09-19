@@ -1,0 +1,28 @@
+# ---------------------------------------------------------------------------
+# Trend Analyst — golden eval cases (spec §8, build brief §4).
+#
+# Each case is a frozen input plus the behaviour the system must show on it, so a
+# change of behaviour is a visible regression rather than a surprise. Cases are
+# seeded from REAL pipeline output (brief P2), never invented: 10 cases in P2,
+# 50 by P5. The runner is evals/run_evals.py.
+#
+# Required fields per case (enforced by the runner's schema):
+#   id                 stable slug, never reused or renumbered
+#   category           must exist in config/categories.yaml
+#   input_signals      the frozen signals the scorer sees (recorded, secrets redacted)
+#   expected_keep      true = the Judge must keep it, false = it must be dropped
+#   expected_fad_label "fad" | "trend" | "evergreen"
+#   score_band         {"min": x, "max": y} inclusive band the MGS must land in
+#   notes              where this case came from (run id + date) — provenance matters
+#
+# Scoring of a case: one LLM-judge call returning 0.0-1.0 plus pass/fail on factual
+# accuracy, citation accuracy, completeness, source quality and tool efficiency.
+# Release rule (spec §8): no rubric may drop more than 2 points from baseline.
+# ---------------------------------------------------------------------------
+
+version: 1
+
+# Seeded in P2 from real L0 output; grown to 50 in P5. Empty is honest: there is no
+# pipeline output to freeze yet, and an eval suite built from imagination is worse
+# than none.
+cases: []

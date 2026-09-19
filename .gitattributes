@@ -1,0 +1,15 @@
+# Normalize line endings: LF in the repo, for every file, on every platform.
+# Bash scripts MUST stay LF or they break inside WSL ("\r: command not found").
+* text=auto eol=lf
+
+*.sh text eol=lf
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+
+*.png binary
+*.jpg binary
+*.pdf binary
+*.glb binary
