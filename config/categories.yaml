@@ -54,6 +54,39 @@ stop_phrases:
   - newsletter
   - podcast
 
+#: PRODUCT-FORM nouns: the words that end a product phrase without naming the domain.
+#:
+#: "chisel storage", "monitor mount", "trowel holder" — the buyable thing is the *form* (a storage
+#: unit, a mount, a holder) and the domain comes from the modifier. Without this list those phrases
+#: are rejected by a taxonomy that only knows "chisel", "monitor" and "trowel" — which is how the
+#: first live run lost its single best find ("chisel storage", found in a woodworking complaint).
+#:
+#: A phrase whose head (last content word) is one of these is filed under the category its
+#: *modifiers* point at; if no modifier matches a category, it stays uncategorized rather than
+#: being filed under a guess.
+product_nouns:
+  [storage, organizer, holder, stand, mount, rack, shelf, tray, bin, box, caddy, case, cover,
+   sleeve, pouch, bag, pad, mat, liner, insert, divider, clip, hook, strap, tie, wrap, seal,
+   kit, set, blade, guard, jig, gauge, bracket, adapter, dispenser, scraper, sharpener, filter,
+   brush, cleaner, sprayer, spreader, clamp, vise, bit, drill bit, sandpaper, tape, ruler,
+   light, lamp, fan, heater, cushion, pillow, cover plate, strap, belt, harness, leash]
+
+#: Brands and licensed characters. A phrase naming one is NOT a product gap: the market is closed
+#: to a solo operator, and recommending it is recommending a lawsuit. The Judge gate caught
+#: "mickey mouse" (dropped as "a generic copyrighted character") but only after it had been scored,
+#: ranked and judged — this list rejects it at the taxonomy, where it costs nothing.
+#: Deliberately short and obvious: a long list would rot, and the Judge is the real backstop.
+brand_blocklist:
+  [mickey mouse, disney, marvel, nintendo, pokemon, lego, barbie, star wars, harry potter,
+   iphone, ipad, airpods, macbook, apple watch, dyson, yeti, stanley cup, hydro flask,
+   nike, adidas, goPro, keurig, nespresso, instant pot, dyson, weber, traeger,
+   xbox, playstation, switch, kindle, roomba, tesla,
+   # 3D-printing and workshop brands: the first P7 run mined "bambulabs filament" and "bana
+   # filament" (a typo of Bambu Lab). A brand name in front of a generic noun is a review of that
+   # brand's product, which is not a product gap for anyone who is not that brand.
+   bambu, bambulabs, prusa, creality, ender, anycubic, elegoo, voron, markforged, formlabs,
+   dewalt, makita, milwaukee, bosch, ryobi, festool, ridgid]
+
 categories:
   home_office:
     label: Home office and desk

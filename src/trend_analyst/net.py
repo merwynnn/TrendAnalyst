@@ -31,7 +31,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import httpx
 
@@ -109,6 +109,47 @@ def request_url(url: str, params: Mapping[str, str] | None = None) -> str:
         return url
     separator = "&" if urlsplit(url).query else "?"
     return f"{url}{separator}{urlencode(sorted(params.items()))}"
+
+
+#: Query parameters that carry a *cursor* rather than identifying the request. A replay must not
+#: depend on them: live runs advance the watermark, and a fixture recorded yesterday then answers
+#: "no response for after=2026-09-20" to a request that is otherwise identical. Everything else
+#: (the path, the subreddit, the limit, the sort order) still has to match, which is what stops this
+#: from serving one request's response for another's.
+CURSOR_PARAMS: Final[frozenset[str]] = frozenset(
+    {"after", "before", "since", "until", "page", "offset", "cursor", "start", "end"}
+)
+
+
+def _cursor_value(target: str) -> tuple[int, str]:
+    """A sort key for a request key's cursor parameters: bigger is newer.
+
+    Used only to break a tie between recordings that differ *only* by cursor. Numeric cursors
+    (epochs, page numbers) sort numerically; everything else sorts as a string, and the date-shaped
+    ones (``2026-09-20``) order correctly that way anyway.
+    """
+    parts = urlsplit(target)
+    best: tuple[int, str] = (0, "")
+    for pair in (parts.query or "").split("&"):
+        name, _, value = pair.partition("=")
+        if name not in CURSOR_PARAMS or not value:
+            continue
+        key = (int(value), "") if value.isdigit() else (0, value)
+        best = max(best, key)
+    return best
+
+
+def _without_cursors(target: str) -> str:
+    """A request key with its cursor parameters removed, for fixture lookup."""
+    parts = urlsplit(target)
+    if not parts.query:
+        return target
+    kept = [
+        pair
+        for pair in parts.query.split("&")
+        if pair.split("=", 1)[0] not in CURSOR_PARAMS
+    ]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "&".join(kept), ""))
 
 
 
@@ -295,6 +336,28 @@ class RecordedHttpClient:
 
         entries = self.fixture.get("responses", {})
         if target not in entries:
+            # A recording is a sample of *requests*, and some of their parameters move: a replay
+            # after a live night asks for `after=<new watermark>` and the fixture holds
+            # `after=<recording-day>`. That is not a missing recording — it is the same request with
+            # a different cursor — so match again with the cursor parameters removed. Everything
+            # else (`subreddit`, `limit`, `sort`, a path) must match exactly, which is what keeps
+            # this from serving one source's response for another's request.
+            fallback = _without_cursors(target)
+            matched = [key for key in entries if _without_cursors(key) == fallback]
+            if len(matched) > 1:
+                # Several recordings differ only by cursor (a fixture recorded twice). All of them
+                # are valid answers to this request — the cursor is the caller's watermark, not part
+                # of the question — so serve the newest one and say so. Deterministic, and the
+                # order does not depend on dict insertion.
+                matched.sort(key=_cursor_value, reverse=True)
+            if matched:
+                entry = entries[matched[0]]
+                return HttpResponse(
+                    url=target,
+                    status_code=int(entry.get("status", 200)),
+                    text=str(entry.get("body", "")),
+                    headers=dict(entry.get("headers", {})),
+                )
             raise FixtureMissError(
                 f"fixture {self.source_id!r} has no response for {target}. "
                 f"Recorded URLs: {len(entries)}. Re-record with "

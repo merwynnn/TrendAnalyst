@@ -32,6 +32,7 @@ from typing import Any
 import yaml
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import Session
 
 from config.categories import default_taxonomy
 from config.settings import ConfigError, default_config_dir, load_settings
@@ -41,7 +42,7 @@ from trend_analyst.store.db import (
     create_db_engine,
     create_session_factory,
 )
-from trend_analyst.store.models import EvalCase, SignalRow
+from trend_analyst.store.models import Candidate, EvalCase, Judgement, SignalRow
 from trend_analyst.store.snapshots import RankedScore, latest_ranked
 
 __all__ = ["KEEP_THRESHOLD_LABEL", "SEED_PREFIX", "build_cases", "main"]
@@ -112,13 +113,30 @@ def build_cases(
             if queue and len(ordered) < count:
                 ordered.append(queue.pop(0))
 
-    # The median split, computed over the cases that will actually be seeded.
+    # The median split, computed over the cases that will actually be seeded. Used only for
+    # candidates the Judge has not seen: where a verdict exists, the verdict is the label.
     scores = sorted(row.mgs for row in ordered)
     threshold = scores[len(scores) // 2] if scores else 0.0
+
+    verdicts = _judge_verdicts(session, [row.phrase for row in ordered])
 
     cases: list[dict[str, Any]] = []
     for index, row in enumerate(ordered, start=1):
         signals = _evidence(session, row.phrase, as_of)
+        verdict = verdicts.get(row.phrase)
+        if verdict is None:
+            expected_keep = row.mgs >= threshold
+            provenance = (
+                f"expected_keep from the provisional P2 rule (threshold {threshold:.2f}, the "
+                f"{KEEP_THRESHOLD_LABEL}; no Judge verdict exists for this candidate yet)"
+            )
+        else:
+            expected_keep = verdict["decision"] == "keep"
+            provenance = (
+                f"expected_keep from the Judge verdict of {verdict['created_at']:%Y-%m-%d} "
+                f"({verdict['model']}, confidence {verdict['confidence']:.2f}): "
+                f"{verdict['reason'][:160]}"
+            )
         cases.append(
             {
                 "id": f"{SEED_PREFIX.lower()}-{index:02d}-{row.category}-"
@@ -126,7 +144,7 @@ def build_cases(
                 "category": row.category,
                 "phrase": row.phrase,
                 "input_signals": signals,
-                "expected_keep": row.mgs >= threshold,
+                "expected_keep": expected_keep,
                 "expected_fad_label": row.fad_label,
                 "score_band": {
                     "min": round(max(row.mgs - BAND, 0.0), 2),
@@ -136,14 +154,44 @@ def build_cases(
                 "weights_version": row.weights_version,
                 "notes": (
                     f"seeded from run {row.run_id} on {as_of:%Y-%m-%d}; "
-                    f"{row.mentions} mentions; observed MGS {row.mgs:.2f}; "
-                    "expected_keep from the provisional P2 rule (threshold "
-                    f"{threshold:.2f}, the {KEEP_THRESHOLD_LABEL}; the P3 Judge replaces "
-                    "this judgement)"
+                    f"{row.mentions} mentions; observed MGS {row.mgs:.2f}; {provenance}"
                 ),
             }
         )
     return cases
+
+
+def _judge_verdicts(session: Session, phrases: Sequence[str]) -> dict[str, dict[str, Any]]:
+    """The newest Judge verdict per phrase, for the labels the Judge is entitled to decide.
+
+    The P2 threshold was always documented as provisional ("the P3 Judge replaces this judgement")
+    and P7 proved why: the first 50 cases were seeded from a candidate pool that was 67% sentence
+    fragments, and once the Judge saw those candidates it dropped 13 of them — cases whose labels
+    said "keep" because the phrase-quality score was high, which is exactly the mislabelling the
+    Judge exists to catch. Where a verdict exists, it labels the case; where none does, the
+    threshold still does, and the case's notes say which of the two produced it.
+    """
+    if not phrases:
+        return {}
+    rows = session.execute(
+        select(Judgement, Candidate.phrase)
+        .join(Candidate, Candidate.id == Judgement.candidate_id)
+        .where(Judgement.gate == "judge", Candidate.phrase.in_(list(phrases)))
+        .order_by(Judgement.created_at.desc(), Judgement.id.desc())
+    ).all()
+    verdicts: dict[str, dict[str, Any]] = {}
+    for judgement, phrase in rows:
+        verdicts.setdefault(
+            str(phrase),
+            {
+                "decision": str(judgement.decision),
+                "confidence": float(judgement.confidence),
+                "reason": str(judgement.reason or ""),
+                "model": str(judgement.model or "unknown"),
+                "created_at": judgement.created_at,
+            },
+        )
+    return verdicts
 
 
 def main(argv: Sequence[str] | None = None) -> int:

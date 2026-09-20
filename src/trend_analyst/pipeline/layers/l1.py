@@ -59,6 +59,11 @@ __all__ = [
 DEFAULT_PRUNE_FRACTION: Final = 0.05
 #: The floor described in the module docstring.
 DEFAULT_MIN_KEEP: Final = 10
+#: Documents a phrase must appear in to count as "shared" rather than one person's remark. Used for
+#: the reported single-document share and as the secondary sort key in the prune — *not* as a hard
+#: gate, because the measurement said otherwise: the first live night's best find ("chisel storage")
+#: came from exactly one document, and a two-document gate would have deleted it.
+MIN_DOCUMENTS_FOR_NEWS: Final = 2
 #: Staleness horizon for *new* mining: a phrase last mentioned this long ago is not news.
 DEFAULT_MAX_AGE_DAYS: Final = 90
 
@@ -74,12 +79,19 @@ MAX_NGRAM: Final = 4
 
 #: Words that cannot start or end a phrase. Not a linguist's stop list — a product
 #: researcher's: these are the words that make a phrase a sentence fragment rather than a
-#: thing someone could buy or want.
+#: thing someone could buy or want. The indefinites and common verbs near the end were added in P7
+#: after a live run mined "anybody saw" (modifier: "anybody", which was missing here; head: "saw",
+#: which is a product and therefore must NOT be in this list).
+#:
+#: **This is a word list, not prose the parser can ignore.** The first version of the P7 edit put an
+#: explanatory comment *inside* the string below, and `.split()` turned "saw", `"saw"` and "saw,"
+#: into stop words — silently deleting the saw products from mining. `test_stop_words_are_words_and_
+#: never_a_product_noun` now enforces both halves of that lesson.
 STOP_WORDS: Final[frozenset[str]] = frozenset(
     # A single long word list is more readable than a 130-line tuple literal.
     """
     a about after again against all also am an and any are around as at back be because been
-    before being below best better between both but by can cannot could did do does doing done
+    before being below best better between both but by cannot could did do does doing done
     down during each even ever every few for from further get got had has have having he her
     here hers him his how however i if in into is it its itself just like made make many may me
     might more most much must my no nor not now of off on once one only or other our out over own
@@ -88,6 +100,8 @@ STOP_WORDS: Final[frozenset[str]] = frozenset(
     while who why will with would yet you your yours
     actually basically still means mean important thing things stuff really quite pretty
     even far due let lets making takes take comes come goes go knows know thats thats
+    anybody anyone somebody someone everybody everyone nobody none nothing anything something
+    everything wants wanted needs needed went
     """.split()  # noqa: SIM905 - a literal list of this length reads worse than the string
 )
 
@@ -103,6 +117,44 @@ NOISE_PATTERNS: Final[tuple[re.Pattern[str], ...]] = tuple(
         r"\d{4,}",
     )
 )
+
+#: Documents are skipped when they contain at least this many NON-English marker words. Two, not
+#: one, because a single hit is often a proper noun, an abbreviation or a loanword inside an
+#: English sentence; two hits in a short post is a language.
+NON_ENGLISH_MARKERS_MIN: Final = 2
+
+#: Function words from the languages that actually appear in the pain-mining subreddits — Turkish
+#: (r/3Dprinting, r/smallbusiness), German, Spanish, Portuguese, French, Italian — plus Swedish and
+#: Dutch, which are cheap to include and rare enough not to hurt. NOT a language detector: it is a
+#: *document* gate whose named failure mode is a short foreign post with no marker words in it.
+#:
+#: Why it exists at all: a live night mined "filament nerisi" and "filament nermeniz" (Turkish for
+#: "filament recommendation") and spent two of ten candidate slots on them. The Judge dropped both —
+#: correctly, and after the scoring and a provider call. English is the only language this
+#: pipeline's taxonomy and prompts are written for, so a foreign document is out of scope, not bad
+#: data.
+NON_ENGLISH_MARKERS: Final[frozenset[str]] = frozenset(
+    """
+    ve bir icin bu ile da de cok ama bana benim nasil hangi nerisi oneri onerisi var yok
+    mein meine meinen ich nicht und sehr auch nur oder aber mit von für auf ist sind war
+    para con una não muito pero como porque también todo nada
+    avec pour mais dans sur très je tu il elle nous vous est sont
+    con per molto anche dove quando perché questo questa
+    och att det inte med för är som men
+    een het niet van voor met ook maar deze
+    """.split()  # noqa: SIM905
+)
+
+
+def _is_foreign(text: str) -> bool:
+    """True when a document is written in a language this pipeline is not built for.
+
+    Called on the *document*, not the phrase: a Turkish sentence almost always carries a Turkish
+    function word even when the product noun inside it is an English loanword ("filament nerisi").
+    """
+    tokens = set(tokens_of(text))
+    return len(tokens & NON_ENGLISH_MARKERS) >= NON_ENGLISH_MARKERS_MIN
+
 
 _WORD_SPLIT: Final = re.compile(r"\s+")
 
@@ -130,12 +182,17 @@ class MinedPhrase:
     series: tuple[float, ...] = ()
     #: Populated by `mine()` for everything that survived the prune.
     kept: bool = False
+    #: Distinct documents the phrase appeared in. The single-document share is the honest measure of
+    #: how much of a night's output rests on one post. Defaulted last so every existing construction
+    #: site keeps working while the callers that need it pass it explicitly.
+    documents: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
             "phrase": self.phrase,
             "category": self.category_id,
             "mentions": self.mentions,
+            "documents": self.documents,
             "sources": list(self.source_ids),
             "ewma_z": round(self.ewma_zscore, 4),
             "velocity_percentile": round(self.velocity_percentile, 2),
@@ -151,6 +208,7 @@ class MiningReport:
     ngrams: int = 0
     filtered: int = 0
     unmatched: int = 0
+    foreign_texts: int = 0
     stale: int = 0
     mined: int = 0
     collapsed: int = 0
@@ -158,16 +216,28 @@ class MiningReport:
     kept: int = 0
     prune_fraction: float = DEFAULT_PRUNE_FRACTION
     min_keep: int = DEFAULT_MIN_KEEP
+    #: Why phrases had no category, by reason ("no_head", "head_not_buyable", "brand", ...).
+    #: The first live nights could only report "unmatched" for 17,000 phrases, which cannot tell a
+    #: small taxonomy from fragmentary mining.
+    rejections: dict[str, int] = field(default_factory=dict)
+    #: Phrases that appeared in a single document. Reported, not rejected: with a small lake the
+    #: candidate floor (min_keep) makes a hard >=2-document gate throw away findable products —
+    #: measured, not assumed: the one-document phrase "chisel storage" was the first night's best
+    #: find, and a two-document gate would have deleted it.
+    single_document: int = 0
     by_category: dict[str, int] = field(default_factory=dict)
     phrases: tuple[MinedPhrase, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
             "texts_scanned": self.texts_scanned,
+            "foreign_texts": self.foreign_texts,
             "ngrams": self.ngrams,
             "filtered": self.filtered,
             "unmatched": self.unmatched,
+            "rejections": dict(sorted(self.rejections.items(), key=lambda item: -item[1])),
             "stale": self.stale,
+            "single_document": self.single_document,
             "mined": self.mined,
             "collapsed": self.collapsed,
             "pruned": self.pruned,
@@ -179,11 +249,26 @@ class MiningReport:
 
     def summary(self) -> str:
         """One line for the run's ledger note."""
-        return (
-            f"L1: {self.texts_scanned} texts -> {self.ngrams} n-grams -> "
-            f"{self.mined} candidates (unmatched {self.unmatched}, stale {self.stale}, "
-            f"collapsed {self.collapsed}), pruned {self.pruned}, kept {self.kept}"
+        reasons = ", ".join(
+            f"{reason} {count}" for reason, count in list(self.rejections.items())[:4]
         )
+        return (
+            f"L1: {self.texts_scanned} texts ({self.foreign_texts} non-English skipped) -> "
+            f"{self.ngrams} n-grams -> "
+            f"{self.mined} candidates (rejected {self.unmatched}: {reasons}; "
+            f"stale {self.stale}, collapsed {self.collapsed}), pruned {self.pruned}, "
+            f"kept {self.kept} ({self.single_document} from a single document)"
+        )
+
+
+def _is_numeric_leading(tokens: Sequence[str]) -> bool:
+    """True when a phrase starts with a bare number: "16 bolt" is a measurement, not a product.
+
+    "3d printer" survives because "3d" is not purely numeric; "5/16 bolt" becomes "16 bolt" in the
+    tokenizer and is exactly the fragment this rejects (the Judge's words: "a fragmented
+    misinterpretation of a '5/16 bolt'").
+    """
+    return bool(tokens) and tokens[0].isdigit()
 
 
 def _is_noise(phrase: str) -> bool:
@@ -271,6 +356,34 @@ def collapse_substrings(phrases: Sequence[MinedPhrase]) -> tuple[list[MinedPhras
     return survivors, collapsed
 
 
+def _scan_text(
+    text: str,
+    *,
+    timestamp: datetime,
+    source_id: str,
+    taxonomy: Taxonomy,
+    report: MiningReport,
+    occurrences: dict[str, list[tuple[datetime, str, str]]],
+) -> None:
+    """Extract one document's phrases, categorise them, and record why each one was dropped."""
+    for phrase in extract_phrases(text):
+        report.ngrams += 1
+        tokens = tuple(phrase.split())
+        if _is_numeric_leading(tokens):
+            report.unmatched += 1
+            key = "numeric_leading"
+            report.rejections[key] = report.rejections.get(key, 0) + 1
+            continue
+        category_id, reason = taxonomy.match_with_reason(phrase, stop_words=STOP_WORDS)
+        if category_id is None:
+            report.unmatched += 1
+            report.rejections[reason] = report.rejections.get(reason, 0) + 1
+            continue
+        occurrences.setdefault(f"{category_id}{phrase}", []).append(
+            (timestamp, source_id, text)
+        )
+
+
 def mine(
     texts: Iterable[tuple[str, datetime, str]],
     *,
@@ -304,16 +417,19 @@ def mine(
     for text, timestamp, source_id in texts:
         if not text or source_id in excluded_sources:
             continue
+        if _is_foreign(text):
+            # Out of scope, not bad data: counted separately from "rejected for its shape".
+            report.foreign_texts += 1
+            continue
         report.texts_scanned += 1
-        for phrase in extract_phrases(text):
-            report.ngrams += 1
-            category_id = taxonomy.match(phrase)
-            if category_id is None:
-                report.unmatched += 1
-                continue
-            occurrences.setdefault(f"{category_id}\x1f{phrase}", []).append(
-                (timestamp, source_id, text)
-            )
+        _scan_text(
+            text,
+            timestamp=timestamp,
+            source_id=source_id,
+            taxonomy=taxonomy,
+            report=report,
+            occurrences=occurrences,
+        )
 
     # Group by category: velocity is a per-category statistic, always.
     by_category: dict[str, list[MinedPhrase]] = {}
@@ -329,6 +445,7 @@ def mine(
                 category_id=category_id,
                 mentions=len(hits),
                 source_ids=tuple(sorted({hit[1] for hit in hits})),
+                documents=len({hit[2] for hit in hits}),
                 first_seen=min(hit[0] for hit in hits),
                 last_seen=last_seen,
                 texts=tuple(dict.fromkeys(hit[2] for hit in hits))[:5],
@@ -375,11 +492,23 @@ def mine(
     # incomparable.
     target = min(max(math.ceil(prune_fraction * report.mined), min_keep), report.mined)
     ordered = sorted(
-        everything, key=lambda mined: (-mined.velocity_percentile, -mined.mentions, mined.phrase)
+        everything,
+        key=lambda mined: (
+            # Wider-shared phrases first, then velocity, then volume. A phrase two people wrote
+            # independently is a stronger signal than a phrase one person wrote twice, and with a
+            # small lake the velocity percentiles are too coarse to separate them.
+            -int(mined.documents >= MIN_DOCUMENTS_FOR_NEWS),
+            -mined.velocity_percentile,
+            -mined.mentions,
+            mined.phrase,
+        ),
     )
     kept = [replace(mined, kept=True) for mined in ordered[:target]]
     report.pruned = report.mined - target
     report.kept = target
+    # Counted on what was actually kept, not on everything that survived filtering: the number next
+    # to it in the ledger line says how much of tonight's output rests on a single post.
+    report.single_document = sum(1 for mined in kept if mined.documents < MIN_DOCUMENTS_FOR_NEWS)
     # Kept phrases come back in velocity order: the scorer may re-sort, the ledger note will
     # not, and "what did we keep" is easier to trust when the order means something.
     report.phrases = tuple(kept)

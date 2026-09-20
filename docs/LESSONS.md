@@ -91,6 +91,10 @@ or this file — and preferably encoded in a check rather than a sentence.
 "` is passed | Wrote it again with `newline="
 "`; converted the two CRLF scripts on disk | `.gitattributes` already promised `*.sh text eol=lf` — the gap was the working tree, not the repo. Check with `python -c "print(open(f,'rb').read().count(b'
 '))"` before trusting any generated script |
+| 5.8 | **Prose inside a data literal became data** (P7) | Three words silently became stop words: `saw`, `"saw"`, `saw,` — which deleted the saw products (`circ saw`, `saw blade`) from mining | The stop list is one string that gets `.split()`. The first P7 edit put its explanatory comment *inside* that string, and split() cannot tell a word from a sentence about words | Moved the prose out; added a guard that every entry is `str.isalpha()` | `test_stop_words_are_words_and_never_a_product_noun`. A word list is a data file that happens to live in Python; treat a comment in it as an entry, because the parser does |
+| 5.9 | **A stop word that is also a product noun deletes products** (P7) | Adding `saw` (and `can`) to the stop list removed `circ saw` and `saw blade` from the candidate pool; the tests caught it immediately | English reuses words across parts of speech: *saw* is a verb and a tool, *can* is a modal and a container, *board* is a verb and a product | The stop list may not contain any word that appears as a head of a core noun or in `product_nouns` | The same guard test asserts the disjointness, so the next person adding "board" or "clip" gets a failure with the reason, not a mystery |
+| 5.10 | **A planned filter would have deleted the only good find** (P7) | The ≥2-document rule I intended to add (to kill one-off remarks) would have removed `chisel storage` — the single genuine product gap the first live night produced, which appeared in exactly one post | A plausible rule, applied to a lake too small to test it, and measured only in the imagination | Measured it against the real data *before* shipping: kept the count as a **ranking** signal and reported it, made the gate a parameter no caller sets | `docs/evidence/P7.md` "honest gaps" records the measurement. Rule: when a filter's justification is "obviously noisy", run it over the real lake and count what it deletes |
+
 | 5.5 | **Fixing the symptom, not the class** (recurring near-miss) | Each bug above was fixed once, in one place | The reflex fix is local | After each bug: name the class, then add the guard for the class | This file. Each entry's **prevention** column is the deliverable, not the fix |
 
 ---
@@ -122,6 +126,29 @@ nothing:**
 **The rule this class earned:** *a mocked provider verifies the gateway; only a live provider
 verifies the configuration.* The gateway logic was right the whole time — the model names, the
 credits and the load were not, and no mock could have said so.
+
+---
+
+## 7. Output quality: what counts as "a result" (P7)
+
+The phases before P7 measured whether the system *ran*. P7 measured whether its answer was worth
+reading, and the answer was no — with a cause that no amount of gate-building would have found.
+
+| # | Finding | Symptom | Root cause | Fix | Prevention |
+|---|---|---|---|---|---|
+| 7.1 | **The gates were fine; the funnel was broken** | 67% of the Judge's drops were sentence fragments; the ranked table was 2 real product nouns in 25 rows | The taxonomy required a buyable noun *anywhere* in the phrase, so "filament" in tools_diy admitted "filament whatever", "filament thanks", "filament is tpu" | The head-noun rule (the phrase's head must be the buyable noun) plus a shared `product_nouns` list of form nouns | `tests/test_decide.py` carries the fragments the Judge actually rejected as a regression suite, with the Judge's own reason per case |
+| 7.2 | **A missing vocabulary silently deletes the best find** | The head rule, as first designed, rejected `chisel storage` | "storage" was in no category's core list — 17 product-form nouns were missing across all ten categories | `product_nouns` in `categories.yaml`, and the rule's second branch: form-noun head → category from the modifiers | The test asserts `chisel storage` stays mined, and its docstring says why |
+| 7.3 | **A metric that cannot distinguish two failures is not a metric** | The night's note said "unmatched 17,634", which cannot tell a small taxonomy from fragmentary mining | Only the total was counted | `match_with_reason` returns a named reason; the mining report counts them and the ledger line prints the top four | Every rejection now carries a name, and the note is a diagnosis |
+| 7.4 | **Foreign text is out of scope, not bad data** | Two of ten candidate slots went to Turkish phrases; the Judge dropped both after they had been scored | No language gate; the sources are English-language subreddits but the *posters* are not | A document gate on non-English marker words (≥2), counted separately from shape rejections | The named failure mode is in the docstring: a short foreign post with no marker words still gets through, and that is accepted |
+| 7.5 | **A phrase can be grammatical and still empty** | The Judge kept "excellent filament" (someone praising their filament) at 0.70 confidence | Structure is not meaning: an opinion adjective plus a product noun is a review, not a search | Not fixed — reported. The Judge is the semantic layer, and it is charitable | `docs/evidence/P7.md` §honest gaps. The next lever is a modifier-class check (opinion adjectives vs property adjectives) |
+| 7.6 | **The lake is the binding constraint, not the matcher** | 1,181 texts → 79 candidates → 10 kept, and 5 of those from a single document; velocity percentiles over mostly-singleton phrases are arithmetic on noise | Twelve of fifteen enabled sources have no plugin | Named as the next phase's work, with the numbers that justify it | `docs/evidence/P7.md`; the mining report prints the single-document share every night |
+
+**The class rule:** *a pipeline's quality is the quality of its worst filter, and the worst filter is
+usually the first one.* Every phase before this one tested the layers after mining; the mining layer
+had no measure of "is this a product?" until the question was asked of real output. The guard that
+would have caught it earlier is the one now in the gate: read the top ten and ask whether a human
+would search for it.
+
 
 ---
 

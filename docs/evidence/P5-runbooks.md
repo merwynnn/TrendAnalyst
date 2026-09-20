@@ -55,7 +55,7 @@ uv run python -m trend_analyst.health --json  # hn_firebase shows degraded
 
 **Detected.**
 
-- `[WARN] rate_limit_storm` -> runbook `http-429-storm`: hn_firebase hit rate limits 4 time(s) across 5 run(s) since 2026-09-17
+- `[WARN] rate_limit_storm` -> runbook `http-429-storm`: hn_firebase hit rate limits 4 time(s) across 5 run(s) since 2026-09-18
   - action (SAFE): lower the source's rps in config/sources.yaml and restart the run from its checkpoint; if the storm continues, propose disabling it for 7 days
   - reversible: git revert the sources.yaml commit
   - blast radius if ignored: a slower source delays its own collection; other sources are unaffected

@@ -3,13 +3,17 @@
     uv run python -m scripts.llm_drill            # uses the configured providers
     uv run python -m scripts.llm_drill --dry-run  # shows what it would do, calls nobody
 
-It runs five probes, in this order, and each one must pass:
+It runs six probes, in this order, and each one must pass:
 
 1. **Live call.** One real request through the gateway, and the answer must validate against
    the Judge schema. This is the only place in the project that spends a token, so it asks for
    a small, bounded judgement rather than a full batch.
 2. **Failover.** The same prompt with the first provider's credential deliberately broken: the
    chain must move on and still return a schema-valid answer, recording each failure.
+2b. **Failover beyond the first provider.** Every entry of the first provider is injected as down,
+   so the answer must come from a *different* provider (or, if none can answer, the gate must
+   degrade with a reason). Probe 2 alone cannot prove this: the chain usually answers from another
+   model of the same provider.
 3. **Cache.** The identical prompt again must be served from the cache and reach no provider.
 4. **Accounting.** The token log and the quota ledger must both show the spend, per gate.
 5. **Grounding.** A verdict citing a URL the pipeline never collected must come back with that
@@ -107,7 +111,7 @@ def run_drill(  # noqa: PLR0915 - five probes read better as one sequence than a
     root_note: str = "",
     nonce: str | None = None,
 ) -> tuple[bool, list[str]]:
-    """The five probes. Returns (all passed, transcript lines).
+    """The probes. Returns (all passed, transcript lines).
 
     Each probe carries a fresh ``nonce`` in its payload. The first draft did not, and the probes
     silently interfered through the cache: a previous drill's probe-2 call had warmed that key, so
@@ -199,8 +203,24 @@ def run_drill(  # noqa: PLR0915 - five probes read better as one sequence than a
         # duty is to record the failure and then try each remaining provider IN CHAIN ORDER —
         # that is asserted always. That a *different* provider answered is asserted only when
         # one is configured and funded; otherwise the chain correctly exhausts and degrades.
-        attempted = [note.split(":")[0] for note in probe_two.notes]
-        expected = [provider.name for provider in chain]
+        def _entry_of(note: str) -> str:
+            """The chain entry a failure note came from, as `provider:model`.
+
+            Retries inside one entry produce several notes for the same entry, so consecutive
+            duplicates collapse: the probe checks the *chain* order, and three attempts on entry
+            two are still one step of the chain. (Comparing raw notes against provider names made
+            this probe fail while the gateway was behaving correctly — a retry storm on the third
+            Gemini entry read as "the chain skipped Groq".)
+            """
+            parts = note.split(":")
+            return f"{parts[0]}:{parts[1]}" if len(parts) > 1 else parts[0]
+
+        attempted = []
+        for note in probe_two.notes:
+            entry = _entry_of(note)
+            if not attempted or attempted[-1] != entry:
+                attempted.append(entry)
+        expected = [str(provider) for provider in chain]
         # The first call was injected to fail; every subsequent attempt must follow chain order.
         order_ok = attempted == expected[: len(attempted)]
         # What is assertable depends on what can actually answer. The gateway's duty is to record
@@ -233,6 +253,63 @@ def run_drill(  # noqa: PLR0915 - five probes read better as one sequence than a
         for note in probe_two.notes[:4]:
             lines.append(f"      failed: {note[:150]}")
         sender = real_sender
+
+    # --- 2b. cross-provider failover: the whole first provider is unavailable --
+    #
+    # Probe 2 injects one failure, so the chain usually answers from the *same* provider and the
+    # second provider is never proven to work. That is the gap this probe closes, and it only became
+    # possible once the second provider had a key: every entry of the first provider is failed, and
+    # the answer must arrive from a different one — which also exercises the real transport, the
+    # real credential and the real response parser of that provider end to end.
+    first_provider = chain[0].name
+    others = tuple(provider for provider in chain if provider.name != first_provider)
+    if others:
+        cross_chain = (*[p for p in chain if p.name == first_provider], *others)
+        down = {provider.name for provider in cross_chain if provider.name == first_provider}
+
+        def failing_provider(provider: ProviderSpec, text: str) -> tuple[str, int, int]:
+            """Fail every entry of the first provider, as an outage would."""
+            if provider.name in down:
+                raise RuntimeError(f"injected outage on {provider}")
+            return real_sender(provider, text)
+
+        with sessions() as session:
+            probe_cross = call_gate(
+                session,
+                gate="judge",
+                prompt=render_prompt({**CANDIDATE, "probe": 6, "nonce": stamp}, INSTRUCTIONS),
+                schema=JudgeVerdict,
+                sender=failing_provider,
+                chain=cross_chain,
+                budget=budget,
+                payload={**CANDIDATE, "probe": 6, "nonce": stamp},
+                evidence_urls=EVIDENCE_URLS,
+            )
+            session.commit()
+            answered_by_other = bool(probe_cross.ok and probe_cross.provider != first_provider)
+            # Only assertable if a later provider can actually answer. When none can (no key, no
+            # credit, no local model), the required behaviour is a degradation with a reason.
+            degrade_or_switch = answered_by_other or (
+                not probe_cross.ok and bool(probe_cross.reason)
+            )
+            ok = bool(degrade_or_switch)
+            passed &= ok or not live
+            lines.append(
+                _line(
+                    f"failover beyond {first_provider}",
+                    ok,
+                    (
+                        f"every {first_provider} entry injected as down; answered by "
+                        f"{probe_cross.provider}:{probe_cross.model}"
+                        if answered_by_other
+                        else f"no later provider could answer, so the gate degraded with a "
+                        f"reason: {probe_cross.reason[:160]}"
+                    ),
+                    live=live,
+                )
+            )
+            for note in probe_cross.notes[:3]:
+                lines.append(f"      failed: {note[:150]}")
 
     # --- 3. cache: the same prompt must not reach a provider -------------------
     reached: list[str] = []

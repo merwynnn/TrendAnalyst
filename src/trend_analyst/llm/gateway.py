@@ -61,6 +61,8 @@ __all__ = [
 #:   a spent free-tier quota (429)             -> the whole chain degrades with a reason; the
 #:                                                 flash-lite entry exists because its rate limit
 #:                                                 is far higher than the full models
+#:   a retired model name on Groq              -> 404; the provider moved to
+#:                                                 openai/gpt-oss-120b (verified live)
 #:   "llama3.3-70b" on Cerebras                 -> 404; that account serves only
 #:                                                 qwen-3.8-27b and gpt-oss-120b
 #: `gemini-flash-latest` with API version v1beta is what answers 200 for this key. Note that
@@ -81,7 +83,11 @@ DEFAULT_CHAIN: Final[tuple[tuple[str, str], ...]] = (
     # (LESSONS §6.5: a day of drilling exhausted the quota). It sits after the stronger models so
     # quality comes first and rate limits are what it rescues, not what it is chosen for.
     ("gemini", "gemini-3.5-flash-lite"),
-    ("groq", "llama-3.3-70b-versatile"),
+    # Groq retired `llama-3.3-70b-versatile`: the live probe answered
+    # `404 model_not_found` with a valid key, and `GET /openai/v1/models` listed
+    # gpt-oss-120b among 13 available models. Picking the same model Cerebras serves keeps the
+    # fallback semantically identical, so a failover changes who answers, not what is answered.
+    ("groq", "openai/gpt-oss-120b"),
     ("cerebras", "gpt-oss-120b"),
     ("ollama", "llama3.2"),
 )
