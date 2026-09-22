@@ -340,8 +340,8 @@ def test_revenue_triple_is_ordered_and_keeps_the_price_inside_the_band() -> None
     taxonomy = default_taxonomy()
     for category_id in taxonomy.ids:
         category = taxonomy.by_id(category_id)
-        features = extract_features(f"{category.core[0]} thing", points("x", days=90, per_day=4),
-                                    as_of=NOW)
+        features = extract_features(f"a {category_id.replace('_', ' ')} thing",
+                                    points("x", days=90, per_day=4), as_of=NOW)
         triple = estimate_revenue(features, category)
         assert 0 < triple.p10 <= triple.p50 <= triple.p90
         # Assumptions travel with the numbers, including the seed that produced them.
@@ -370,36 +370,15 @@ def test_revenue_model_is_conservative_by_construction() -> None:
 
 
 # ---------------------------------------------------------------------------
-# the taxonomy itself
+# the taxonomy itself: scoring buckets, not a matcher
 # ---------------------------------------------------------------------------
-def test_taxonomy_requires_a_buyable_noun() -> None:
-    """The rule that keeps proper nouns out of a product pipeline."""
-    taxonomy = default_taxonomy()
-    assert taxonomy.match("cat jarman") is None  # a person, matched "cat" before this rule
-    assert taxonomy.match("children killing") is None
-    assert taxonomy.match("cat litter") == "pets"
-    assert taxonomy.match("dog crate") == "pets"
-    assert taxonomy.match("standing desk mat") == "home_office"
-    assert taxonomy.match("usb c hub") == "electronics_accessories"
-
-
-def test_taxonomy_rejects_thread_furniture() -> None:
-    taxonomy = default_taxonomy()
-    assert taxonomy.match("weekly thread desk") is None
-    assert taxonomy.match("megathread coffee grinder") is None
-
-
-def test_taxonomy_penalties_and_coverage() -> None:
+def test_taxonomy_penalties() -> None:
     taxonomy = default_taxonomy()
     assert taxonomy.penalty_for("patent lithium battery design") == (
         "patent",
         "lithium battery",
     )
-    coverage = taxonomy.coverage(["cat litter", "cat jarman", "circ saw"])
-    assert coverage["phrases"] == 3
-    assert coverage["matched"] == 2
-    assert coverage["matched_pct"] == pytest.approx(66.7)
-    assert coverage["by_category"] == {"pets": 1, "tools_diy": 1}
+    assert taxonomy.penalty_for("wooden spoon") == ()
 
 
 def test_taxonomy_file_errors_are_loud(tmp_path) -> None:
@@ -413,18 +392,27 @@ def test_taxonomy_file_errors_are_loud(tmp_path) -> None:
 
     invalid = tmp_path / "invalid.yaml"
     invalid.write_text(
-        "version: 1\ncategories:\n  x:\n    label: X\n    keywords: [a]\n    core: [a]\n"
+        "version: 1\ncategories:\n  x:\n    label: X\n"
         "    price_band: [50, 10]\n    feasibility_prior: 50\n",
         encoding="utf-8",
     )
     with pytest.raises(TaxonomyError, match="invalid category"):
         load_taxonomy(invalid)
 
+    unknown_keys = tmp_path / "unknown_keys.yaml"
+    unknown_keys.write_text(
+        "version: 1\ncategories:\n  x:\n    label: X\n    keywords: [a]\n    core: [a]\n"
+        "    price_band: [10, 50]\n    feasibility_prior: 50\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(TaxonomyError, match="invalid category"):
+        load_taxonomy(unknown_keys)
+
 
 def test_every_category_has_a_usable_prior() -> None:
     taxonomy = default_taxonomy()
     assert len(taxonomy.categories) >= 8
     for category in taxonomy.categories:
-        assert category.core, f"{category.id} has no buyable nouns"
+        assert category.label, f"{category.id} has no label"
         assert 0 < category.price_band[0] < category.price_band[1]
         assert 0 < category.feasibility_prior <= 100

@@ -1,0 +1,24 @@
+{
+  "completion_tokens": 96,
+  "gate": "extractor",
+  "model": "gemini-3.6-flash",
+  "output": {
+    "products": [
+      {
+        "category": "tools_diy",
+        "doc_ids": [0, 99],
+        "phrase": "rebar cutter",
+        "reason": "Doc 0 asks about one; doc 99 is not in the chunk and must be dropped in code."
+      },
+      {
+        "category": "vehicles",
+        "doc_ids": [1],
+        "phrase": "truck bed extender",
+        "reason": "Not a scoring bucket: the schema must refuse this whole answer."
+      }
+    ]
+  },
+  "prompt_tokens": 640,
+  "recorded_at": "2026-09-21T12:00:00+00:00",
+  "source": "hand-written adversarial fixture: an invented doc ref and an off-taxonomy category"
+}

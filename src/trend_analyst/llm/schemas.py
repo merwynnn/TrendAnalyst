@@ -22,6 +22,8 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 __all__ = [
+    "ExtractedProduct",
+    "ExtractorOutput",
     "GateName",
     "GateSchemaError",
     "JudgeBatch",
@@ -37,11 +39,28 @@ __all__ = [
 #: A fenced block needs three parts when split on the fence marker.
 _FENCE_PARTS: Final = 2
 
-#: The three gates, matching `llm_cache.gate`'s CHECK constraint.
-GateName = Literal["planner", "judge", "writer"]
+#: The gates, matching `llm_cache.gate`'s CHECK constraint (migration 0004).
+GateName = Literal["planner", "judge", "writer", "extractor"]
 
 Decision = Literal["keep", "drop"]
 FadLabel = Literal["fad", "trend", "evergreen"]
+
+#: The scoring buckets the Extractor may file a product under. A closed list on purpose:
+#: an unknown category is a schema violation (retry once, then drop), not a guess the
+#: scorer cannot percentile. Adding an eleventh category means changing this list and
+#: the taxonomy together — visible and intentional, never silent.
+ExtractorCategory = Literal[
+    "baby_kids",
+    "electronics_accessories",
+    "fitness_recovery",
+    "home_improvement",
+    "home_office",
+    "kitchen_dining",
+    "music_audio",
+    "outdoor_garden",
+    "pets",
+    "tools_diy",
+]
 
 
 class GateSchemaError(RuntimeError):
@@ -102,6 +121,32 @@ class JudgeBatch(BaseModel):
 
     def by_phrase(self) -> dict[str, JudgeVerdict]:
         return {verdict.phrase: verdict for verdict in self.verdicts}
+
+
+class ExtractedProduct(BaseModel):
+    """One product the Extractor read out of a chunk of lake texts.
+
+    `doc_ids` are the chunk-local ids of the texts that mention it — the code resolves
+    them against the chunk it sent, and drops every ref it did not send (an invented
+    ref is the extraction equivalent of an invented citation). The phrase must use
+    words from those texts: downstream evidence matching reads the lake, not the model.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    phrase: str = Field(min_length=1, max_length=200)
+    category: ExtractorCategory
+    doc_ids: list[int] = Field(default_factory=list)
+    reason: str = Field(default="", max_length=300)
+
+
+class ExtractorOutput(BaseModel):
+    """A chunk's products: distinct, shippable things people talk about wanting or
+    complaining about — not sentence fragments, not reviews of things that exist."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    products: list[ExtractedProduct] = Field(default_factory=list)
 
 
 class PlannerPlan(BaseModel):

@@ -25,16 +25,16 @@ from pathlib import Path
 from sqlalchemy import select
 
 from config.settings import ConfigError, default_config_dir, load_settings
-from trend_analyst.llm.gates import judge_candidates, pending_judgements
+from trend_analyst.llm.gates import ensure_replay_candidate, judge_candidates, pending_judgements
 from trend_analyst.llm.replay import ReplayMissError, load_fixture, replay_sender
-from trend_analyst.llm.schemas import JudgeVerdict
-from trend_analyst.pipeline.state import finish_run, start_run
+from trend_analyst.llm.schemas import JudgeBatch, JudgeVerdict
+from trend_analyst.pipeline.runs import close_run, open_run
 from trend_analyst.store.db import (
     DatabaseNotConfiguredError,
     create_db_engine,
     create_session_factory,
 )
-from trend_analyst.store.models import Candidate, Judgement
+from trend_analyst.store.models import Judgement
 
 __all__ = ["main"]
 
@@ -73,37 +73,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     sessions = create_session_factory(engine)
-    recorded_phrase = str(JudgeVerdict.model_validate(fixture["output"]).phrase)
+    recorded = JudgeVerdict.model_validate(fixture["output"])
     try:
         with sessions() as session:
             # The recording names one phrase. Judge an explicit batch: that phrase (so the replay
             # applies) plus whatever the newest run left unjudged (so the miss path is exercised).
-            named = session.execute(
-                select(Candidate).where(Candidate.phrase == recorded_phrase)
-            ).scalars().first()
+            # The row is materialized when the lake never produced the phrase — flagged below.
+            named, materialized = ensure_replay_candidate(
+                session, phrase=str(recorded.phrase), category=str(recorded.category)
+            )
             queue = list(pending_judgements(session, limit=args.limit))
-            if named is not None:
-                queue = [named] + [item for item in queue if int(item.id) != int(named.id)]
+            queue = [named] + [item for item in queue if int(item.id) != int(named.id)]
 
             if not queue:
                 print("no candidates to judge: run the collect and decide layers first")
                 return 1
 
-            handle = start_run(session, trigger="manual", resume=False)
+            run_id = open_run(session, trigger="manual")
             session.commit()
             report = judge_candidates(
                 session,
-                run_id=handle.run_id,
+                run_id=run_id,
                 sender=replay_sender(
-                    fixture, covered=[str(candidate.phrase) for candidate in queue]
+                    fixture, schema=JudgeBatch,
+                    covered=[str(candidate.phrase) for candidate in queue],
                 ),
                 candidates=queue,
                 dry_run=args.dry_run,
             )
             if not args.dry_run:
-                finish_run(
+                close_run(
                     session,
-                    str(handle.run_id),
+                    run_id,
                     status="ok" if report.ok else "degraded",
                     layer_status={"L3-judge": report.as_dict()},
                     notes=f"{report.summary()} (replay of {fixture['recorded_at']})",
@@ -118,11 +119,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"recording: {args.fixture}",
         f"recorded: {fixture['recorded_at']} model={fixture['model']} "
         f"tokens={fixture['prompt_tokens']}+{fixture['completion_tokens']}",
-        f"replayed verdict: {recorded_phrase} -> "
-        f"{JudgeVerdict.model_validate(fixture['output']).decision}",
+        f"replayed verdict: {recorded.phrase} -> {recorded.decision}",
         report.summary(),
         f"judgements now in the table: {len(rows)}",
     ]
+    if materialized:
+        lines.append("candidate materialized from the recording, not extracted")
     payload = {
         "fixture": args.fixture,
         "recorded_at": fixture["recorded_at"],

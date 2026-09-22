@@ -84,10 +84,10 @@ class PluginContractError(RuntimeError):
 
 
 class SourceSkippedError(RuntimeError):
-    """A source is not run this time, for a reason the ledger must record verbatim.
+    """A source is not run this time, for a reason the run log must record verbatim.
 
     Raised instead of returning an empty batch, because "we skipped this" and "this
-    returned nothing" are different facts, and the health CLI reports them differently.
+    returned nothing" are different facts, and the run report shows them differently.
     The budget path uses it (spec §4.3: quota exhausted, or backing off after a 429), and
     so does a source that has nothing to do this pass.
     """
@@ -400,7 +400,7 @@ class TokenBucket:
 
 
 class QuotaSnapshot(BaseModel):
-    """Per-source spend, as the health CLI reports it (spec §9)."""
+    """Per-source spend within one run, for the run report."""
 
     model_config = _BOUNDARY_CONFIG
 
@@ -704,14 +704,23 @@ def _find_plugin_class(module: ModuleType, entry: SourceEntry) -> type[SourcePlu
     return matching[0]
 
 
-def load_plugin(entry: SourceEntry) -> SourcePlugin:
+def load_plugin(entry: SourceEntry, *, settings: Any = None) -> SourcePlugin:
     """Import a registry entry's module, verify the contract, and instantiate it.
 
     This is the whole "add a source" lifecycle of spec §4.3 made mechanical: add a
     module, add a registry entry, and this function either returns a valid plugin or
-    explains precisely what is wrong.
+    explains precisely what is wrong. Tier-A plugins that take credentials receive
+    them when their constructor asks for `settings`; everything else is built bare.
     """
     module = importlib.import_module(entry.module)
     plugin_class = _find_plugin_class(module, entry)
     validate_plugin(entry, plugin_class)
-    return plugin_class()
+    # Dynamic dispatch by design: Tier-A plugins declare `settings` for credentials,
+    # Tier-S plugins take none. The Any cast is the honesty marker for that split.
+    constructor: Any = plugin_class
+    instance: SourcePlugin
+    if "settings" in inspect.signature(plugin_class.__init__).parameters:
+        instance = constructor(settings=settings)
+    else:
+        instance = constructor()
+    return instance

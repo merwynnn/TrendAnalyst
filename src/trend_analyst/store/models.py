@@ -1,13 +1,10 @@
-"""The database schema (spec §7) — eleven tables, typed.
+"""The database schema (spec §7) — ten tables, typed.
 
-Three rules from the spec shape every decision here:
+Two rules from the spec shape every decision here:
 
 * **Snapshots are append-only and history is never updated in place** (§5.3). `scores`
   and `briefs` carry database triggers that reject UPDATE and DELETE outright, so a bug
   in application code cannot rewrite history — it can only add a correction row.
-* **Side effects live outside the rollback surface** (§5.4). `quota_ledger` is its own
-  append-only table, owned by nobody's checkpoint, with a uniqueness key that makes a
-  resumed run *physically unable* to record the same spend twice.
 * **State stores references and hashes, never blobs** (brief §4). `raw_items` keeps the
   payload hash and cursor; payloads are bounded at the plugin boundary.
 
@@ -47,7 +44,6 @@ __all__ = [
     "Candidate",
     "EvalCase",
     "LLMCache",
-    "QuotaLedger",
     "RawItem",
     "Run",
     "RunSourceLog",
@@ -127,7 +123,8 @@ class Run(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('running', 'ok', 'degraded', 'failed', 'aborted')", name="status_known"
+            "status IN ('running', 'ok', 'degraded', 'failed', 'aborted', 'empty')",
+            name="status_known",
         ),
         CheckConstraint(
             "trigger IN ('nightly', 'hourly', 'manual', 'resume')", name="trigger_known"
@@ -137,7 +134,7 @@ class Run(Base):
 
 
 class RunSourceLog(Base):
-    """Per (run, source) outcome — what the health CLI reads for ok/degraded/down."""
+    """Per (run, source) outcome — one log row per source per run."""
 
     __tablename__ = "run_source_log"
 
@@ -334,36 +331,8 @@ class Brief(Base):
 
 
 # ---------------------------------------------------------------------------
-# Side effects and caches: outside the rollback surface
+# Caches
 # ---------------------------------------------------------------------------
-class QuotaLedger(Base):
-    """Append-only spend ledger (spec §5.4, §7).
-
-    Owned by no checkpoint. `operation` is the caller's idempotency key (for example
-    ``fetch:page:3``), and the unique constraint on (run_id, source_id, operation) is the
-    compare-and-swap: a resumed run re-issuing the same spend loses the race and gets a
-    conflict instead of spending twice.
-    """
-
-    __tablename__ = "quota_ledger"
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    source_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    run_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
-    operation: Mapped[str] = mapped_column(String(128), nullable=False)
-    amount: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    spend_date: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    __table_args__ = (
-        UniqueConstraint("run_id", "source_id", "operation", name="uq_quota_ledger_run_id"),
-        CheckConstraint("amount > 0", name="amount_positive"),
-        Index("ix_quota_ledger_source_id_spend_date", "source_id", "spend_date"),
-    )
-
-
 class LLMCache(Base):
     """Hash -> gate output, 30-day TTL (spec §6.3). Identical work never pays twice."""
 

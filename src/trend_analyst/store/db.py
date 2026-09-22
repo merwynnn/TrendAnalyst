@@ -2,7 +2,7 @@
 
 Kept deliberately free of pipeline logic: this module answers "how do I talk to
 Postgres", and :func:`check_database` answers "is it there, and does it have pgvector" —
-which is what the health CLI reports (spec §9).
+which is what the operator checks before a run.
 
 The DSN comes from the layered settings (so: from `config/secrets.local.yaml`, never from
 the repository). A missing DSN is a typed error with the command that fixes it, not a
@@ -38,7 +38,7 @@ class DatabaseNotConfiguredError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class DatabaseStatus:
-    """What the health CLI needs to know about the database (spec §9)."""
+    """What an operator needs to know about the database before a run."""
 
     ok: bool
     server_version: str | None = None
@@ -117,10 +117,10 @@ def session_scope(factory: sessionmaker[Session]) -> Iterator[Session]:
 
 
 def check_database(engine: Engine) -> DatabaseStatus:
-    """Probe the database for the health CLI (spec §9).
+    """Probe the database before a run.
 
-    Never raises: an unreachable database is a *status*, not an exception — the health
-    command must be able to report "down WITH a reason".
+    Never raises: an unreachable database is a *status*, not an exception — the caller
+    reports "down WITH a reason" instead of crashing.
     """
     try:
         with engine.connect() as connection:

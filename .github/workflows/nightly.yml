@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   # The deterministic nightly: a real Postgres with pgvector, the committed migrations, the recorded
-  # fixtures, then every layer and the ledger reconciliation. No provider key is used, so this job
+  # fixtures, then every layer single-shot. No provider key is used, so this job
   # cannot spend money and cannot be flaky for reasons outside the repository. It answers one
   # question every night: "does the whole pipeline still run, end to end, on real recorded data?"
   pipeline:
@@ -58,27 +58,11 @@ jobs:
           uv run alembic upgrade head
           uv run alembic check
 
-      - name: Every layer on recorded fixtures, then reconcile the ledger
+      - name: Every layer on recorded fixtures, single-shot
         run: uv run python -m scripts.nightly --offline --dry-run --json | tee nightly.json
-
-      - name: The ledger must balance to zero unexplained spend
-        run: |
-          uv run python -c "
-          import json, sys
-          report = json.load(open('nightly.json'))
-          ledger = report.get('reconciliation') or {}
-          print(ledger.get('summary', '(no summary)'))
-          if ledger.get('unexplained'):
-              sys.exit(f'UNEXPLAINED SPEND: {ledger[\"unexplained\"]}')
-          if not ledger.get('balanced'):
-              sys.exit('the ledger did not balance')
-          "
 
       - name: Golden cases
         run: uv run python -m evals.run_evals --json > evals.json; cat evals.json
-
-      - name: Alert inbox (must be silent on a healthy database)
-        run: uv run python -m trend_analyst.monitor.alerts
 
       - name: TTL — what would expire tonight
         run: uv run python -m scripts.ttl_job --dry-run

@@ -51,6 +51,7 @@ __all__ = [
     "JudgeReport",
     "JudgedCandidate",
     "candidate_evidence",
+    "ensure_replay_candidate",
     "evidence_urls",
     "judge_candidates",
     "latest_judgements",
@@ -236,6 +237,31 @@ def candidate_evidence(
 def evidence_urls(evidence: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
     """Every URL a candidate's evidence actually carries — the grounding allowlist."""
     return tuple(str(item["url"]) for item in evidence if item.get("url"))
+
+
+def ensure_replay_candidate(
+    session: Session, *, phrase: str, category: str
+) -> tuple[Candidate, bool]:
+    """Materialize the candidate a recording is about, if the lake never produced it.
+
+    A replay replays a verdict onto a row: without the row there is nothing to rule on.
+    Since extraction replaced mining, the recorded phrase ("circ saw") may simply not be
+    among tonight's products — that is a coverage fact about the night, not a reason the
+    replay cannot exercise schema, grounding and persistence. Returns the row and whether
+    it was created here (the caller flags that in its note, never mistaking the row for
+    an extracted product).
+    """
+    found = session.execute(
+        select(Candidate).where(Candidate.phrase == phrase)
+    ).scalars().first()
+    if found is not None:
+        return found, False
+    candidate = Candidate(
+        phrase=phrase, category=category or "tools_diy", status="active", mentions=0
+    )
+    session.add(candidate)
+    session.flush()
+    return candidate, True
 
 
 def pending_judgements(

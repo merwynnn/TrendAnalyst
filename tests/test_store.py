@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy import Engine, inspect, select, text
+from sqlalchemy import Engine, inspect, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
@@ -33,7 +33,6 @@ from trend_analyst.store.models import (
     Candidate,
     EvalCase,
     LLMCache,
-    QuotaLedger,
     RawItem,
     Run,
     RunSourceLog,
@@ -55,7 +54,6 @@ EXPECTED_TABLES = {
     "eval_cases",
     "judgements",
     "llm_cache",
-    "quota_ledger",
     "raw_items",
     "run_source_log",
     "runs",
@@ -179,18 +177,9 @@ def test_append_only_triggers_exist(db_engine: Engine) -> None:
         {
             "trg_scores_append_only",
             "trg_briefs_append_only",
-            "trg_quota_ledger_append_only",
             "trg_judgements_append_only",
         }
     )
-
-
-def test_daily_quota_view_exists(db_engine: Engine) -> None:
-    with db_engine.connect() as connection:
-        rows = connection.execute(
-            text("SELECT source_id, spend_day, requests FROM quota_spend_daily")
-        ).all()
-    assert rows == []  # empty, but the view is queryable
 
 
 def test_check_database_reports_version_and_pgvector(db_engine: Engine) -> None:
@@ -294,40 +283,6 @@ def test_briefs_reject_update(db_session: Session) -> None:
 
     with pytest.raises(DBAPIError, match="append-only"), db_session.begin_nested():
         flush_sql(db_session, "UPDATE briefs SET verdict = 'changed' WHERE id = :id", id=brief.id)
-
-
-def test_quota_ledger_rejects_delete(db_session: Session) -> None:
-    entry = QuotaLedger(source_id="hn_firebase", operation="fetch:page:1", amount=1)
-    flush_objects(db_session, entry)
-
-    with pytest.raises(DBAPIError, match="append-only"), db_session.begin_nested():
-        flush_action(db_session, lambda session: session.delete(entry))
-
-
-# ---------------------------------------------------------------------------
-# Compare-and-swap: a resume cannot double-spend (spec §5.4)
-# ---------------------------------------------------------------------------
-def test_quota_ledger_refuses_a_duplicate_operation(db_session: Session) -> None:
-    run = make_run(db_session)
-    first = QuotaLedger(source_id="hn_firebase", run_id=run.id, operation="page:1")
-    duplicate = QuotaLedger(source_id="hn_firebase", run_id=run.id, operation="page:1")
-    flush_objects(db_session, first)
-
-    with pytest.raises(IntegrityError), db_session.begin_nested():
-        flush_objects(db_session, duplicate)
-
-
-def test_quota_ledger_allows_the_same_operation_in_a_different_run(db_session: Session) -> None:
-    """The key is (run, source, operation): yesterday's page 1 is not today's."""
-    first, second = make_run(db_session), make_run(db_session)
-    flush_objects(
-        db_session,
-        QuotaLedger(source_id="hn_firebase", run_id=first.id, operation="page:1"),
-        QuotaLedger(source_id="hn_firebase", run_id=second.id, operation="page:1"),
-    )
-
-    rows = db_session.execute(select(QuotaLedger)).scalars().all()
-    assert len(rows) == 2
 
 
 def test_briefs_cannot_be_emitted_twice_for_one_run(db_session: Session) -> None:

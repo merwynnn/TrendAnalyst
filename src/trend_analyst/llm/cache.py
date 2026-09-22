@@ -22,7 +22,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from trend_analyst.llm.schemas import GateName
-from trend_analyst.store.models import LLMCache, QuotaLedger
+from trend_analyst.store.models import LLMCache
 
 __all__ = [
     "DEFAULT_TTL_DAYS",
@@ -31,7 +31,6 @@ __all__ = [
     "normalize_input",
     "purge_expired",
     "put_cached",
-    "record_tokens",
     "token_spend_by_gate",
 ]
 
@@ -119,42 +118,6 @@ def put_cached(
         completion_tokens=completion_tokens,
     )
     session.execute(statement.on_conflict_do_nothing(index_elements=["cache_key"]))
-    session.flush()
-
-
-def record_tokens(
-    session: Session,
-    *,
-    gate: GateName | str,
-    model: str,
-    prompt_tokens: int,
-    completion_tokens: int,
-    cache_key_value: str,
-    run_id: Any = None,
-) -> None:
-    """Write one token-spend row, keyed per call so the ledger accumulates instead of collapsing.
-
-    `quota_ledger`'s compare-and-swap key is (run, source, operation); a token row therefore
-    carries the cache key in its operation. Two identical calls are the *same* spend (the
-    second is a cache hit and never reaches a provider), which is exactly the property that
-    makes the ledger safe to re-read after a resume.
-    """
-    total = int(prompt_tokens) + int(completion_tokens)
-    if total <= 0:
-        # `quota_ledger.amount` has a CHECK of `amount > 0`: a zero-token row is not a spend,
-        # and writing one would fail the constraint rather than record nothing.
-        return
-    operation = f"llm:{gate}:tokens:{cache_key_value[:24]}"
-    statement = pg_insert(QuotaLedger).values(
-        source_id=f"llm_{gate}",
-        run_id=run_id,
-        operation=operation,
-        amount=total,
-        spend_date=datetime.now(UTC),
-        # The ledger has one free-text column, not a metadata blob, so the breakdown goes in it.
-        reason=f"{model}: prompt={int(prompt_tokens)} completion={int(completion_tokens)}",
-    )
-    session.execute(statement.on_conflict_do_nothing())
     session.flush()
 
 

@@ -126,12 +126,12 @@ class RankedScore:
 
 
 def upsert_candidates(session: Session, mined: Sequence[MinedPhrase]) -> dict[str, int]:
-    """Insert or refresh the candidates mining produced; returns ``phrase -> id``.
+    """Insert or refresh the candidates extraction produced; returns ``phrase -> id``.
 
     Accumulating fields move forward only: ``mentions`` takes the new count (it is a
     measurement of now), ``first_seen_at`` the earlier of the two, ``last_seen_at`` the
-    later. ``status`` is never touched here — a human or the Judge gate owns that, and a
-    mining run that could reactivate a rejected candidate would undo a decision.
+    later. ``status`` is never touched here — a human or the Judge gate owns that, and an
+    extraction run that could reactivate a rejected candidate would undo a decision.
     """
     if not mined:
         return {}

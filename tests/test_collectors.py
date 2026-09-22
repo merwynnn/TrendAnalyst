@@ -38,12 +38,36 @@ from trend_analyst.sources.base import (
 )
 from trend_analyst.sources.registry import SourceEntry, default_registry_path, load_registry
 from trend_analyst.sources.tier_s.arctic_shift import PAIN_SUBS, ArcticShiftPlugin
+from trend_analyst.sources.tier_s.gdelt import QUERIES as GDELT_QUERIES
+from trend_analyst.sources.tier_s.gdelt import GdeltDocPlugin
 from trend_analyst.sources.tier_s.hn import API as HN_API
 from trend_analyst.sources.tier_s.hn import HackerNewsPlugin
+from trend_analyst.sources.tier_s.itchio import FEEDS as ITCH_FEEDS
+from trend_analyst.sources.tier_s.itchio import ItchIoPlugin
+from trend_analyst.sources.tier_s.itunes import QUERIES as ITUNES_QUERIES
+from trend_analyst.sources.tier_s.itunes import ITunesSearchPlugin
+from trend_analyst.sources.tier_s.mastodon import API as MASTODON_API
+from trend_analyst.sources.tier_s.mastodon import MastodonTrendsPlugin
+from trend_analyst.sources.tier_s.openalex import QUERIES as OPENALEX_QUERIES
+from trend_analyst.sources.tier_s.openalex import OpenAlexPlugin
+from trend_analyst.sources.tier_s.shopify import SHOPS, ShopifyPublicPlugin
+from trend_analyst.sources.tier_s.suggest import SEEDS, SuggestAutocompletePlugin
 from trend_analyst.sources.tier_s.wiki import WikipediaPageviewsPlugin, days_to_fetch
+from trend_analyst.sources.tier_s.wordpress import WordPressOrgPlugin
 
 NOW = datetime(2026, 5, 20, 6, 0, tzinfo=UTC)
-IMPLEMENTED = ("hn_firebase", "wiki_pageviews", "arctic_shift")
+IMPLEMENTED = (
+    "hn_firebase",
+    "wiki_pageviews",
+    "arctic_shift",
+    "mastodon_trends",
+    "wordpress_org",
+    "suggest_autocomplete",
+    "shopify_public",
+    "itunes_search",
+    "openalex_arxiv",
+    "itch_io",
+)
 
 
 class FrozenClock:
@@ -158,7 +182,7 @@ def test_implemented_plugins_satisfy_their_registry_entry(
 def test_stubbed_sources_still_fail_loudly(registry: Any) -> None:
     """A source without a plugin is an error the developer sees, not an empty fetch."""
     with pytest.raises(PluginContractError, match="defines no SourcePlugin"):
-        load_plugin(registry.by_id("gdelt_doc"))
+        load_plugin(registry.by_id("google_books"))
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +511,738 @@ def test_arctic_partial_sweep_when_the_budget_runs_out(registry: Any, fixtures_d
 
 
 # ---------------------------------------------------------------------------
+# Mastodon trends
+# ---------------------------------------------------------------------------
+def test_mastodon_first_pass_fetches_trends_in_one_request(
+    registry: Any, fixtures_dir: Path
+) -> None:
+    entry = registry.by_id("mastodon_trends")
+    ctx, client, _budget = make_context(entry, fixtures_dir)
+
+    batch = MastodonTrendsPlugin().fetch(ctx)
+    signals = MastodonTrendsPlugin().parse(batch)
+
+    assert batch.item_count == 1, "one trends response per run"
+    assert batch.request_count == 1
+    assert len(client.requests) == 1
+    assert set(batch.status_codes) == {200}
+    assert batch.cursor is not None
+    assert batch.cursor.isdigit()
+
+    assert len(signals) == 7, "eight trending posts, one image-only skipped"
+    assert metric_names(signals) == {"mastodon_engagement"}
+    for signal in signals:
+        assert signal.source_id == "mastodon_trends"
+        assert signal.entity.strip()
+        assert "<" not in signal.entity, "no markup survives parsing"
+        assert signal.url is not None
+        assert signal.url.startswith("https://"), "federated instances link off-host"
+        assert signal.quote
+        assert signal.ts.tzinfo is not None
+        assert signal.value >= 0
+        assert signal.metadata["author"]
+        assert signal.metadata["language"] == "en"
+
+
+def test_mastodon_second_pass_reasks_and_dedups_by_hash(
+    registry: Any, fixtures_dir: Path
+) -> None:
+    """Trends have no incremental query: the rerun re-asks, and the identical payload
+    hash is what makes the second run cheap — asserted one layer up, in run_l0."""
+    entry = registry.by_id("mastodon_trends")
+    first_ctx, _first_client, _budget = make_context(entry, fixtures_dir)
+    first = MastodonTrendsPlugin().fetch(first_ctx)
+
+    second_ctx, second_client, _budget = make_context(entry, fixtures_dir, cursor=first.cursor)
+    second = MastodonTrendsPlugin().fetch(second_ctx)
+
+    assert second.not_modified is False, "no staleness signal exists; dedup decides"
+    assert len(second_client.requests) == 1
+    assert second.cursor == first.cursor, "same payload, same newest id"
+    assert len(MastodonTrendsPlugin().parse(second)) == 7
+
+
+def test_mastodon_request_shape(registry: Any, fixtures_dir: Path) -> None:
+    entry = registry.by_id("mastodon_trends")
+    seen: list[str] = []
+
+    class Recorder:
+        source_id = "mastodon_trends"
+
+        def get(self, url: str, *, params: Any = None, headers: Any = None) -> HttpResponse:
+            target = request_url(url, params)
+            seen.append(target)
+            return HttpResponse(url=target, status_code=200, text="[]")
+
+    ctx, _client, _budget = make_context(entry, fixtures_dir, max_items=5, client=Recorder())
+    MastodonTrendsPlugin().fetch(ctx)
+
+    assert len(seen) == 1
+    assert seen[0].startswith(f"{MASTODON_API}?")
+    assert "limit=5" in seen[0], "the caller's cap is honoured"
+
+
+def test_mastodon_skips_image_only_posts() -> None:
+    """A trending picture with no words is not minable text."""
+    payload = json.dumps([
+        {"id": "1", "created_at": "2026-09-21T10:00:00Z", "content": "",
+         "url": "https://mastodon.social/@a/1", "account": {"acct": "a"}},
+        {"id": "2", "created_at": "2026-09-21T10:01:00Z",
+         "content": "<p>I wish my dishwasher were quieter</p>",
+         "url": "https://mastodon.social/@b/2", "account": {"acct": "b"},
+         "favourites_count": 3, "reblogs_count": 1, "replies_count": 0},
+    ])
+    batch = RawBatch.from_parts(source_id="mastodon_trends", parts=[payload], fetched_at=NOW)
+    signals = MastodonTrendsPlugin().parse(batch)
+
+    assert len(signals) == 1
+    assert signals[0].entity == "I wish my dishwasher were quieter"
+    assert signals[0].value == 4.0
+    assert signals[0].metadata["author"] == "b"
+
+
+def test_mastodon_strips_markup_but_keeps_words() -> None:
+    payload = json.dumps([
+        {"id": "9", "created_at": "2026-09-21T10:00:00Z",
+         "content": "<p>Hello <a href=\"https://x.test\">world</a>!</p>",
+         "url": "https://mastodon.social/@c/9", "account": {"acct": "c"}},
+    ])
+    batch = RawBatch.from_parts(source_id="mastodon_trends", parts=[payload], fetched_at=NOW)
+    signals = MastodonTrendsPlugin().parse(batch)
+
+    assert len(signals) == 1
+    assert signals[0].entity == "Hello world!"
+
+
+def test_mastodon_skips_when_the_budget_is_already_spent(
+    registry: Any, fixtures_dir: Path
+) -> None:
+    entry = registry.by_id("mastodon_trends")
+    ctx, _client, budget = make_context(entry, fixtures_dir, budget_per_day=1)
+    budget.try_acquire()  # spend the only request
+
+    with pytest.raises(SourceSkippedError, match="budget refused"):
+        MastodonTrendsPlugin().fetch(ctx)
+
+
+# ---------------------------------------------------------------------------
+# WordPress.org
+# ---------------------------------------------------------------------------
+def test_wordpress_first_pass_reads_the_popular_list(
+    registry: Any, fixtures_dir: Path
+) -> None:
+    entry = registry.by_id("wordpress_org")
+    ctx, client, _budget = make_context(entry, fixtures_dir)
+
+    batch = WordPressOrgPlugin().fetch(ctx)
+    signals = WordPressOrgPlugin().parse(batch)
+
+    assert batch.item_count == 1, "one directory page per run at this limit"
+    assert batch.request_count == 1
+    assert len(client.requests) == 1
+    assert set(batch.status_codes) == {200}
+    assert batch.cursor is not None
+
+    assert len(signals) == 100, "fifty plugins, a rating and an installs signal each"
+    assert metric_names(signals) == {"wp_rating", "wp_installs"}
+    ratings = [signal for signal in signals if signal.metric == "wp_rating"]
+    installs = [signal for signal in signals if signal.metric == "wp_installs"]
+    assert len(ratings) == len(installs) == 50
+    for signal in signals:
+        assert signal.source_id == "wordpress_org"
+        assert signal.entity.strip()
+        assert "&#" not in signal.entity, "entities are unescaped"
+        assert signal.url is not None
+        assert signal.url.startswith("https://wordpress.org/plugins/")
+        assert signal.quote
+        assert signal.ts.tzinfo is not None
+        assert signal.metadata["slug"]
+    assert all(0 <= signal.value <= 100 for signal in ratings)
+    assert all(signal.value >= 0 for signal in installs)
+
+
+def test_wordpress_request_shape(registry: Any, fixtures_dir: Path) -> None:
+    entry = registry.by_id("wordpress_org")
+    seen: list[str] = []
+
+    class Recorder:
+        source_id = "wordpress_org"
+
+        def get(self, url: str, *, params: Any = None, headers: Any = None) -> HttpResponse:
+            target = request_url(url, params)
+            seen.append(target)
+            return HttpResponse(url=target, status_code=200, text='{"plugins": []}')
+
+    ctx, _client, _budget = make_context(entry, fixtures_dir, max_items=120, client=Recorder())
+    WordPressOrgPlugin().fetch(ctx)
+
+    assert len(seen) == 3, "120 plugins at fifty per page is three requests"
+    assert seen[0].startswith("https://api.wordpress.org/plugins/info/1.2/?")
+    assert "browse" in seen[0]
+    assert "popular" in seen[0]
+    assert "page" in seen[2]
+
+
+def test_wordpress_skips_records_without_a_name_or_slug() -> None:
+    payload = json.dumps({"plugins": [
+        {"name": "", "slug": "empty-name"},
+        {"name": "Nameless", "slug": ""},
+        {"name": "Broken Numbers", "slug": "broken", "rating": "high", "active_installs": "many"},
+        {"name": "Good Plugin &#8211; dash", "slug": "good", "rating": 80,
+         "active_installs": 1000, "num_ratings": 10, "short_description": "does things",
+         "last_updated": "2026-09-01"},
+    ]})
+    batch = RawBatch.from_parts(source_id="wordpress_org", parts=[payload], fetched_at=NOW)
+    signals = WordPressOrgPlugin().parse(batch)
+
+    assert len(signals) == 2
+    # \u2013 is the en dash &#8211; decodes to; the escape keeps RUF001 quiet.
+    assert signals[0].entity == "Good Plugin \u2013 dash"
+    assert signals[0].metric == "wp_rating"
+    assert signals[1].metric == "wp_installs"
+    assert signals[1].value == 1000.0
+
+
+def test_wordpress_skips_when_the_budget_is_already_spent(
+    registry: Any, fixtures_dir: Path
+) -> None:
+    entry = registry.by_id("wordpress_org")
+    ctx, _client, budget = make_context(entry, fixtures_dir, budget_per_day=1)
+    budget.try_acquire()  # spend the only request
+
+    with pytest.raises(SourceSkippedError, match="budget refused"):
+        WordPressOrgPlugin().fetch(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Suggest autocomplete
+# ---------------------------------------------------------------------------
+def test_suggest_first_pass_expands_every_seed(
+    registry: Any, fixtures_dir: Path
+) -> None:
+    entry = registry.by_id("suggest_autocomplete")
+    ctx, client, _budget = make_context(entry, fixtures_dir)
+
+    batch = SuggestAutocompletePlugin().fetch(ctx)
+    signals = SuggestAutocompletePlugin().parse(batch)
+
+    assert batch.item_count == 8, "eight seeds at the recorded limit"
+    assert batch.request_count == 8
+    assert len(client.requests) == 8
+    assert set(batch.status_codes) == {200}
+    assert batch.cursor is not None
+
+    assert len(signals) == 80
+    assert metric_names(signals) == {"google_suggest"}
+    for signal in signals:
+        assert signal.source_id == "suggest_autocomplete"
+        assert signal.entity.strip()
+        assert signal.url is not None
+        assert signal.url.startswith("https://www.google.com/search?q=")
+        assert " " not in signal.url.split("q=", 1)[1], "the citation URL is encoded"
+        assert signal.quote == signal.entity
+        assert signal.ts.tzinfo is not None
+        assert 1 <= signal.value <= 10
+        assert signal.metadata["seed"] in SEEDS
+        assert signal.metadata["rank"].isdigit()
+
+
+def test_suggest_second_pass_reasks_and_dedups_by_hash(
+    registry: Any, fixtures_dir: Path
+) -> None:
+    """Suggestions are timeless: the rerun re-asks the seeds, and the identical payload
+    hash is what makes the second run cheap — asserted one layer up, in run_l0."""
+    entry = registry.by_id("suggest_autocomplete")
+    first_ctx, _first_client, _budget = make_context(entry, fixtures_dir)
+    first = SuggestAutocompletePlugin().fetch(first_ctx)
+
+    second_ctx, second_client, _budget = make_context(entry, fixtures_dir, cursor=first.cursor)
+    second = SuggestAutocompletePlugin().fetch(second_ctx)
+
+    assert second.not_modified is False, "no staleness signal exists; dedup decides"
+    assert len(second_client.requests) == 8
+    assert second.cursor == first.cursor, "same seeds, same run date"
+    assert len(SuggestAutocompletePlugin().parse(second)) == 80
+
+
+def test_suggest_request_shape(registry: Any, fixtures_dir: Path) -> None:
+    entry = registry.by_id("suggest_autocomplete")
+    seen: list[str] = []
+
+    class Recorder:
+        source_id = "suggest_autocomplete"
+
+        def get(self, url: str, *, params: Any = None, headers: Any = None) -> HttpResponse:
+            target = request_url(url, params)
+            seen.append(target)
+            return HttpResponse(url=target, status_code=200, text='["q", []]')
+
+    ctx, _client, _budget = make_context(entry, fixtures_dir, max_items=3, client=Recorder())
+    SuggestAutocompletePlugin().fetch(ctx)
+
+    assert len(seen) == 3, "three seeds, three requests, no more"
+    assert seen[0].startswith("https://suggestqueries.google.com/complete/search?")
+    assert "client=firefox" in seen[0]
+    assert "q=" in seen[0]
+
+
+def test_suggest_skips_misshapen_answers() -> None:
+    batch = RawBatch.from_parts(
+        source_id="suggest_autocomplete",
+        parts=['{"completions": ["x"]}', "not json", '["seed"]'],
+        fetched_at=NOW,
+    )
+    assert SuggestAutocompletePlugin().parse(batch) == []
+
+
+def test_suggest_skips_when_the_budget_is_already_spent(
+    registry: Any, fixtures_dir: Path
+) -> None:
+    entry = registry.by_id("suggest_autocomplete")
+    ctx, _client, budget = make_context(entry, fixtures_dir, budget_per_day=1)
+    budget.try_acquire()  # spend the only request
+
+    with pytest.raises(SourceSkippedError, match="budget refused"):
+        SuggestAutocompletePlugin().fetch(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Shopify storefronts
+# ---------------------------------------------------------------------------
+def test_shopify_first_pass_reads_every_shop(
+    registry: Any, fixtures_dir: Path
+) -> None:
+    entry = registry.by_id("shopify_public")
+    ctx, client, _budget = make_context(entry, fixtures_dir)
+
+    batch = ShopifyPublicPlugin().fetch(ctx)
+    signals = ShopifyPublicPlugin().parse(batch)
+
+    assert batch.item_count == len(SHOPS), "one part per shop, in SHOPS order"
+    assert batch.request_count == len(SHOPS)
+    assert len(client.requests) == len(SHOPS)
+    assert set(batch.status_codes) == {200}
+    assert batch.cursor is not None
+
+    assert len(signals) == 40, "eight products per shop at the recorded limit"
+    assert metric_names(signals) == {"shopify_price"}
+    for signal in signals:
+        assert signal.source_id == "shopify_public"
+        assert signal.entity.strip()
+        assert signal.url is not None
+        assert ".myshopify.com/products/" in signal.url
+        assert signal.quote
+        assert signal.ts.tzinfo is not None
+        assert signal.value >= 0
+        assert signal.metadata["shop"] in SHOPS
+        assert signal.metadata["vendor"]
+
+
+def test_shopify_parts_stay_aligned_when_a_shop_fails(
+    registry: Any, fixtures_dir: Path
+) -> None:
+    """A closed endpoint must not misattribute every shop behind it."""
+    entry = registry.by_id("shopify_public")
+
+    class Flaky:
+        source_id = "shopify_public"
+
+        def get(self, url: str, *, params: Any = None, headers: Any = None) -> HttpResponse:
+            if "ruggable" in url:
+                return HttpResponse(url=url, status_code=404, text="not found")
+            return HttpResponse(url=url, status_code=200,
+                                text='{"products": [{"title": "T", "handle": "t", '
+                                     '"variants": [{"price": "9.99"}], '
+                                     '"published_at": "2026-09-01T00:00:00Z"}]}')
+
+    ctx, _client, _budget = make_context(entry, fixtures_dir, client=Flaky())
+    batch = ShopifyPublicPlugin().fetch(ctx)
+
+    assert batch.item_count == len(SHOPS), "failures leave empty parts, not shifted ones"
+    signals = ShopifyPublicPlugin().parse(batch)
+    assert len(signals) == len(SHOPS) - 1
+    assert {signal.metadata["shop"] for signal in signals} == set(SHOPS) - {"ruggable"}
+
+
+def test_shopify_request_shape(registry: Any, fixtures_dir: Path) -> None:
+    entry = registry.by_id("shopify_public")
+    seen: list[str] = []
+
+    class Recorder:
+        source_id = "shopify_public"
+
+        def get(self, url: str, *, params: Any = None, headers: Any = None) -> HttpResponse:
+            target = request_url(url, params)
+            seen.append(target)
+            return HttpResponse(url=target, status_code=200, text='{"products": []}')
+
+    ctx, _client, _budget = make_context(entry, fixtures_dir, max_items=3, client=Recorder())
+    ShopifyPublicPlugin().fetch(ctx)
+
+    assert len(seen) == len(SHOPS)
+    assert seen[0].startswith("https://gymshark.myshopify.com/products.json?")
+    assert "limit=3" in seen[0], "the caller's cap is honoured"
+
+
+def test_shopify_skips_unpriced_products() -> None:
+    payload = json.dumps({"products": [
+        {"title": "No Price", "handle": "np", "variants": []},
+        {"title": "Bad Price", "handle": "bp", "variants": [{"price": "free"}]},
+        {"title": "Good <b>Bottle</b>", "handle": "gb", "variants": [{"price": "24.50"}],
+         "vendor": "V", "product_type": "T", "body_html": "<p>Keeps water cold</p>",
+         "published_at": "not-a-date"},
+    ]})
+    batch = RawBatch.from_parts(source_id="shopify_public", parts=[payload], fetched_at=NOW)
+    signals = ShopifyPublicPlugin().parse(batch)
+
+    assert len(signals) == 1
+    assert signals[0].entity == "Good Bottle"
+    assert signals[0].value == 24.5
+    assert signals[0].quote == "Keeps water cold"
+    assert signals[0].metadata["shop"] == "gymshark", "first part belongs to the first shop"
+
+
+def test_shopify_skips_when_the_budget_is_already_spent(
+    registry: Any, fixtures_dir: Path
+) -> None:
+    entry = registry.by_id("shopify_public")
+    ctx, _client, budget = make_context(entry, fixtures_dir, budget_per_day=1)
+    budget.try_acquire()  # spend the only request
+
+    with pytest.raises(SourceSkippedError, match="budget refused"):
+        ShopifyPublicPlugin().fetch(ctx)
+
+
+# ---------------------------------------------------------------------------
+# iTunes Search
+# ---------------------------------------------------------------------------
+def test_itunes_first_pass_searches_every_query(
+    registry: Any, fixtures_dir: Path
+) -> None:
+    entry = registry.by_id("itunes_search")
+    ctx, client, _budget = make_context(entry, fixtures_dir)
+
+    batch = ITunesSearchPlugin().fetch(ctx)
+    signals = ITunesSearchPlugin().parse(batch)
+
+    assert batch.item_count == len(ITUNES_QUERIES)
+    assert batch.request_count == len(ITUNES_QUERIES)
+    assert len(client.requests) == len(ITUNES_QUERIES)
+    assert set(batch.status_codes) == {200}
+    assert batch.cursor is not None
+
+    assert len(signals) == 112, "eight queries at the recorded limit, two signals per app"
+    assert metric_names(signals) == {"itunes_rating", "itunes_ratings"}
+    ratings = [signal for signal in signals if signal.metric == "itunes_rating"]
+    counts = [signal for signal in signals if signal.metric == "itunes_ratings"]
+    assert len(ratings) == len(counts) == 56
+    for signal in signals:
+        assert signal.source_id == "itunes_search"
+        assert signal.entity.strip()
+        assert signal.url is not None
+        assert signal.url.startswith("https://apps.apple.com/")
+        assert signal.quote
+        assert signal.ts.tzinfo is not None
+        assert signal.metadata["bundle"]
+        assert signal.metadata["genre"]
+    assert all(0 <= signal.value <= 5 for signal in ratings)
+    assert all(signal.value >= 0 for signal in counts)
+
+
+def test_itunes_request_shape(registry: Any, fixtures_dir: Path) -> None:
+    entry = registry.by_id("itunes_search")
+    seen: list[str] = []
+
+    class Recorder:
+        source_id = "itunes_search"
+
+        def get(self, url: str, *, params: Any = None, headers: Any = None) -> HttpResponse:
+            target = request_url(url, params)
+            seen.append(target)
+            return HttpResponse(url=target, status_code=200, text='{"results": []}')
+
+    ctx, _client, _budget = make_context(entry, fixtures_dir, max_items=7, client=Recorder())
+    ITunesSearchPlugin().fetch(ctx)
+
+    assert len(seen) == len(ITUNES_QUERIES)
+    assert seen[0].startswith("https://itunes.apple.com/search?")
+    assert "entity=software" in seen[0]
+    assert "limit=7" in seen[0], "the caller's cap is honoured"
+
+
+def test_itunes_skips_apps_without_a_name() -> None:
+    payload = json.dumps({"results": [
+        {"trackName": "", "averageUserRating": 4.0, "userRatingCount": 5},
+        {"trackName": "Good Timer", "averageUserRating": "high", "userRatingCount": 5},
+        {"trackName": "Good Timer", "averageUserRating": 4.5, "userRatingCount": 120,
+         "bundleId": "com.example.timer", "primaryGenreName": "Productivity",
+         "trackViewUrl": "https://apps.apple.com/us/app/id1",
+         "description": "A timer that works.",
+         "currentVersionReleaseDate": "2026-09-01T00:00:00Z"},
+    ]})
+    batch = RawBatch.from_parts(source_id="itunes_search", parts=[payload], fetched_at=NOW)
+    signals = ITunesSearchPlugin().parse(batch)
+
+    assert len(signals) == 2
+    assert signals[0].entity == "Good Timer"
+    assert signals[0].metric == "itunes_rating"
+    assert signals[0].value == 4.5
+    assert signals[1].metric == "itunes_ratings"
+    assert signals[1].value == 120.0
+    assert signals[1].metadata["bundle"] == "com.example.timer"
+
+
+def test_itunes_skips_when_the_budget_is_already_spent(
+    registry: Any, fixtures_dir: Path
+) -> None:
+    entry = registry.by_id("itunes_search")
+    ctx, _client, budget = make_context(entry, fixtures_dir, budget_per_day=1)
+    budget.try_acquire()  # spend the only request
+
+    with pytest.raises(SourceSkippedError, match="budget refused"):
+        ITunesSearchPlugin().fetch(ctx)
+
+
+# ---------------------------------------------------------------------------
+# OpenAlex
+# ---------------------------------------------------------------------------
+def test_openalex_first_pass_searches_every_query(
+    registry: Any, fixtures_dir: Path
+) -> None:
+    entry = registry.by_id("openalex_arxiv")
+    ctx, client, _budget = make_context(entry, fixtures_dir)
+
+    batch = OpenAlexPlugin().fetch(ctx)
+    signals = OpenAlexPlugin().parse(batch)
+
+    assert batch.item_count == len(OPENALEX_QUERIES)
+    assert batch.request_count == len(OPENALEX_QUERIES)
+    assert len(client.requests) == len(OPENALEX_QUERIES)
+    assert set(batch.status_codes) == {200}
+    assert batch.cursor is not None
+
+    assert len(signals) == 40
+    assert metric_names(signals) == {"openalex_cited"}
+    for signal in signals:
+        assert signal.source_id == "openalex_arxiv"
+        assert signal.entity.strip()
+        assert signal.url is None or signal.url.startswith("https://doi.org/")
+        assert signal.quote
+        assert signal.ts.tzinfo is not None
+        assert signal.value >= 0
+
+
+def test_openalex_request_shape(registry: Any, fixtures_dir: Path) -> None:
+    entry = registry.by_id("openalex_arxiv")
+    seen: list[str] = []
+
+    class Recorder:
+        source_id = "openalex_arxiv"
+
+        def get(self, url: str, *, params: Any = None, headers: Any = None) -> HttpResponse:
+            target = request_url(url, params)
+            seen.append(target)
+            return HttpResponse(url=target, status_code=200, text='{"results": []}')
+
+    ctx, _client, _budget = make_context(entry, fixtures_dir, max_items=7, client=Recorder())
+    OpenAlexPlugin().fetch(ctx)
+
+    assert len(seen) == len(OPENALEX_QUERIES)
+    assert seen[0].startswith("https://api.openalex.org/works?")
+    assert "search=" in seen[0]
+    assert "from_publication_date" in seen[0]
+    assert "per-page=7" in seen[0], "the caller's cap is honoured"
+
+
+def test_openalex_reconstructs_abstracts_and_skips_untitled_works() -> None:
+    payload = json.dumps({"results": [
+        {"title": "", "cited_by_count": 3},
+        {"title": "A sensor paper", "cited_by_count": 12, "doi": "https://doi.org/10.1/x",
+         "publication_date": "2026-08-01",
+         "abstract_inverted_index": {"A": [0], "sensor": [1], "paper": [2]},
+         "primary_topic": {"display_name": "Sensors"}},
+    ]})
+    batch = RawBatch.from_parts(source_id="openalex_arxiv", parts=[payload], fetched_at=NOW)
+    signals = OpenAlexPlugin().parse(batch)
+
+    assert len(signals) == 1
+    assert signals[0].entity == "A sensor paper"
+    assert signals[0].value == 12.0
+    assert signals[0].quote == "A sensor paper"
+    assert signals[0].url == "https://doi.org/10.1/x"
+    assert signals[0].metadata["topic"] == "Sensors"
+
+
+def test_openalex_skips_when_the_budget_is_already_spent(
+    registry: Any, fixtures_dir: Path
+) -> None:
+    entry = registry.by_id("openalex_arxiv")
+    ctx, _client, budget = make_context(entry, fixtures_dir, budget_per_day=1)
+    budget.try_acquire()  # spend the only request
+
+    with pytest.raises(SourceSkippedError, match="budget refused"):
+        OpenAlexPlugin().fetch(ctx)
+
+
+# ---------------------------------------------------------------------------
+# itch.io
+# ---------------------------------------------------------------------------
+def test_itch_first_pass_reads_both_feeds(
+    registry: Any, fixtures_dir: Path
+) -> None:
+    entry = registry.by_id("itch_io")
+    ctx, client, _budget = make_context(entry, fixtures_dir)
+
+    batch = ItchIoPlugin().fetch(ctx)
+    signals = ItchIoPlugin().parse(batch)
+
+    assert batch.item_count == len(ITCH_FEEDS)
+    assert batch.request_count == len(ITCH_FEEDS)
+    assert len(client.requests) == len(ITCH_FEEDS)
+    assert set(batch.status_codes) == {200}
+    assert batch.cursor is not None
+
+    assert len(signals) == 46
+    assert metric_names(signals) == {"itch_price"}
+    for signal in signals:
+        assert signal.source_id == "itch_io"
+        assert signal.entity.strip()
+        assert "<" not in signal.entity, "no markup survives parsing"
+        assert signal.url is not None
+        assert signal.url.startswith("https://")
+        assert signal.quote
+        assert signal.ts.tzinfo is not None
+        assert signal.value >= 0
+        assert signal.metadata["currency"] == "USD"
+
+
+def test_itch_request_shape(registry: Any, fixtures_dir: Path) -> None:
+    entry = registry.by_id("itch_io")
+    seen: list[str] = []
+
+    class Recorder:
+        source_id = "itch_io"
+
+        def get(self, url: str, *, params: Any = None, headers: Any = None) -> HttpResponse:
+            seen.append(request_url(url, params))
+            return HttpResponse(url=url, status_code=200, text="<rss></rss>")
+
+    ctx, _client, _budget = make_context(entry, fixtures_dir, client=Recorder())
+    ItchIoPlugin().fetch(ctx)
+
+    assert seen == list(ITCH_FEEDS), "both feeds, no parameters, nothing else"
+
+
+def test_itch_skips_malformed_xml_and_untitled_items() -> None:
+    batch = RawBatch.from_parts(
+        source_id="itch_io",
+        parts=[
+            "not xml at all",
+            "<rss><channel><item><title></title><link>https://x.test/a</link></item>"
+            "<item><title>Good Game</title><link>https://x.test/b</link>"
+            "<price>9.99</price><description><![CDATA[<p>Fun</p>]]></description>"
+            "<pubDate>Sun, 21 Sep 2026 10:00:00 GMT</pubDate></item></channel></rss>",
+        ],
+        fetched_at=NOW,
+    )
+    signals = ItchIoPlugin().parse(batch)
+
+    assert len(signals) == 1
+    assert signals[0].entity == "Good Game"
+    assert signals[0].value == 9.99
+    assert signals[0].quote == "Fun"
+    assert signals[0].url == "https://x.test/b"
+
+
+def test_itch_skips_when_the_budget_is_already_spent(
+    registry: Any, fixtures_dir: Path
+) -> None:
+    entry = registry.by_id("itch_io")
+    ctx, _client, budget = make_context(entry, fixtures_dir, budget_per_day=1)
+    budget.try_acquire()  # spend the only request
+
+    with pytest.raises(SourceSkippedError, match="budget refused"):
+        ItchIoPlugin().fetch(ctx)
+
+
+# ---------------------------------------------------------------------------
+# GDELT
+# ---------------------------------------------------------------------------
+# NOTE: no first-pass fixture test yet — GDELT throttled this network during
+# recording (429 past its 5 s rule, self-inflicted by probing). The plugin is written
+# and unit-covered; record with `record_fixtures --source gdelt_doc` once the throttle
+# clears, then restore the first-pass test from git history.
+def test_gdelt_request_shape(registry: Any, fixtures_dir: Path) -> None:
+    seen: list[str] = []
+
+    class Recorder:
+        source_id = "gdelt_doc"
+
+        def get(self, url: str, *, params: Any = None, headers: Any = None) -> HttpResponse:
+            target = request_url(url, params)
+            seen.append(target)
+            return HttpResponse(url=target, status_code=200, text='{"articles": []}')
+
+    entry = registry.by_id("gdelt_doc")
+    ctx, _client, _budget = make_context(
+        entry, fixtures_dir, max_items=7, client=Recorder(), now=NOW
+    )
+    GdeltDocPlugin().fetch(ctx)
+
+    assert len(seen) == len(GDELT_QUERIES)
+    assert seen[0].startswith("https://api.gdeltproject.org/api/v2/doc/doc?")
+    assert "mode=artlist" in seen[0]
+    assert "maxrecords=7" in seen[0], "the caller's cap is honoured"
+    assert "format=json" in seen[0]
+
+
+def test_gdelt_skips_untitled_articles() -> None:
+    payload = json.dumps({"articles": [
+        {"title": "", "url": "https://x.test/1", "seendate": "20260921T100000Z"},
+        {"title": "Startup launches widget", "url": "not-a-url",
+         "seendate": "20260921T100000Z", "domain": "x.test"},
+        {"title": "Startup launches widget", "url": "https://x.test/2",
+         "seendate": "not-a-date", "domain": "x.test", "language": "eng"},
+    ]})
+    batch = RawBatch.from_parts(source_id="gdelt_doc", parts=[payload], fetched_at=NOW)
+    signals = GdeltDocPlugin().parse(batch)
+
+    assert len(signals) == 2
+    assert signals[0].url is None, "a non-URL is not cited"
+    assert signals[1].url == "https://x.test/2"
+    assert signals[1].ts == NOW, "an unreadable date falls back to fetch time"
+
+
+def _gdelt_context(
+    registry: Any, fixtures_dir: Path, **kwargs: Any
+) -> tuple[FetchContext, SourceBudget]:
+    """A GDELT context that never touches the (not yet recorded) fixture file."""
+
+    class Unused:
+        source_id = "gdelt_doc"
+
+        def get(self, url: str, **kwargs: Any) -> HttpResponse:
+            raise AssertionError("no request should be made")
+
+    entry = registry.by_id("gdelt_doc")
+    ctx, _client, budget = make_context(
+        entry, fixtures_dir, now=NOW, max_items=kwargs.pop("max_items", 5),
+        client=kwargs.pop("client", Unused()), **kwargs,
+    )
+    return ctx, budget
+
+
+def test_gdelt_skips_when_the_budget_is_already_spent(
+    registry: Any, fixtures_dir: Path
+) -> None:
+    ctx, budget = _gdelt_context(registry, fixtures_dir, budget_per_day=1)
+    budget.try_acquire()  # spend the only request
+
+    with pytest.raises(SourceSkippedError, match="budget refused"):
+        GdeltDocPlugin().fetch(ctx)
+
+
+# ---------------------------------------------------------------------------
 # Fixture hygiene
 # ---------------------------------------------------------------------------
 def test_every_fixture_is_valid_and_stamped(fixtures_dir: Path) -> None:
@@ -502,11 +1258,19 @@ def test_every_fixture_is_valid_and_stamped(fixtures_dir: Path) -> None:
 
 
 def test_fixtures_carry_no_credentials(fixtures_dir: Path) -> None:
-    """Only content-type and retry-after are kept, so a session cookie cannot be committed."""
+    """Headers are stripped to content-type/retry-after at record time; bodies must hold
+    no credential values. Bare `authorization` is ordinary prose in OAuth descriptions
+    (Rank Math's, verbatim, in the WordPress fixture) — and headers cannot carry it
+    (stripped), so the body check looks for value patterns instead of the bare word."""
     for path in sorted((fixtures_dir / "http").glob("*.json")):
-        raw = path.read_text(encoding="utf-8").lower()
-        for forbidden in ("set-cookie", "authorization", "api_key", "bearer ", "session="):
-            assert forbidden not in raw, f"{path.name} mentions {forbidden!r}"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        for url, response in payload["responses"].items():
+            assert set(response.get("headers", {})) <= {"content-type", "retry-after"}, (
+                f"{path.name} keeps more than the two allowlisted headers for {url}"
+            )
+            body = json.dumps(response.get("body", "")).lower()
+            for forbidden in ("set-cookie", "api_key", "bearer ", "session="):
+                assert forbidden not in body, f"{path.name} mentions {forbidden!r}"
 
 
 def test_fixtures_match_enabled_l0_sources(registry: Any, fixtures_dir: Path) -> None:

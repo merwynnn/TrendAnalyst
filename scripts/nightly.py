@@ -1,12 +1,11 @@
-"""The nightly run: every layer in order, then the accounting check that closes P4.
+"""The nightly run: every layer in order, single-shot.
 
     uv run python -m scripts.nightly                 # the real thing
     uv run python -m scripts.nightly --offline       # fixtures + recorded gate answers, no network
     uv run python -m scripts.nightly --dry-run       # walk the plan, write nothing
 
-Order is the specification's (§2): collect, mine, score, judge, write. The run then reconciles the
-ledger and exits non-zero if anything spent cannot be explained — the brief's P4 bar is *"quota
-ledger balanced to zero unexplained spend"*, and a run that skips the check cannot claim it.
+Order is the specification's (§2): collect, mine, score, judge, write, then the TTL job.
+A crash means re-running from scratch — dedup and idempotent inserts keep it cheap.
 
 `--offline` is not a toy: it is how the gate exercises this whole path on every run, with recorded
 HTTP fixtures for the sources and recorded provider answers for the gates. The free tier's quota is
@@ -18,7 +17,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -30,22 +28,29 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from config.categories import TaxonomyError, default_taxonomy
 from config.settings import ConfigError, default_config_dir, load_settings
+from trend_analyst.llm.extract import heuristic_sender
 from trend_analyst.llm.gates import judge_candidates, pending_judgements
 from trend_analyst.llm.providers import settings_sender
 from trend_analyst.llm.replay import ReplayMissError, load_fixture, replay_sender
 from trend_analyst.llm.schemas import JudgeBatch, WriterBrief
 from trend_analyst.llm.writer import stored_briefs, write_briefs
-from trend_analyst.monitor.reconcile import accounted_totals, reconcile
-from trend_analyst.net import fixture_path
+from trend_analyst.net import HttpPolicy, HttpxClient, fixture_path
 from trend_analyst.pipeline.decide import run_decide
-from trend_analyst.pipeline.layers.l2 import L2Report
+from trend_analyst.pipeline.layers.l2 import L2Report, enrich_candidates
 from trend_analyst.pipeline.orchestrator import (
     _client_factory,
     _clock_factory,
     _limits_factory,
     run_l0,
 )
-from trend_analyst.pipeline.state import finish_run, start_run
+from trend_analyst.pipeline.runs import close_run, open_run
+from trend_analyst.sources.base import (
+    FetchContext,
+    PluginContractError,
+    SourceBudget,
+    SystemClock,
+    load_plugin,
+)
 from trend_analyst.sources.registry import default_registry_path, load_registry
 from trend_analyst.store.db import (
     DatabaseNotConfiguredError,
@@ -81,13 +86,15 @@ class NightlyReport:
     writer_status: str = ""
     briefs_written: int = 0
     ttl_summary: str = ""
-    reconciliation: dict[str, Any] = field(default_factory=dict)
-    totals: dict[str, Any] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
     @property
-    def balanced(self) -> bool:
-        return bool(self.reconciliation.get("balanced", False))
+    def ok(self) -> bool:
+        """Nothing crashed: collection and scoring finished, whatever they found."""
+        return self.l0_status not in {"failed", ""} and self.decide_status not in {
+            "failed",
+            "",
+        }
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -104,8 +111,6 @@ class NightlyReport:
             "judge": {"status": self.judge_status, "judged": self.judged},
             "writer": {"status": self.writer_status, "briefs": self.briefs_written},
             "ttl": self.ttl_summary,
-            "reconciliation": self.reconciliation,
-            "totals": self.totals,
             "notes": self.notes,
         }
 
@@ -120,18 +125,9 @@ class NightlyReport:
             f"  L3 judge     {self.judge_status:<8} judged: {self.judged}",
             f"  L3 writer    {self.writer_status:<8} briefs: {self.briefs_written}",
             f"  TTL          {self.ttl_summary}",
-            f"  {self.reconciliation.get('summary', 'ledger: not checked')}",
         ]
-        totals = self.totals.get("ledger_by_kind", {})
-        if totals:
-            lines.append(
-                "  spend by kind: "
-                + ", ".join(f"{kind}={amount}" for kind, amount in sorted(totals.items()))
-            )
         lines.extend(f"  note: {note}" for note in self.notes)
-        lines.append(
-            "NIGHTLY: PASS" if self.balanced else "NIGHTLY: FAIL — spend could not be explained"
-        )
+        lines.append("NIGHTLY: PASS" if self.ok else "NIGHTLY: FAIL — a layer failed")
         return "\n".join(lines)
 
 
@@ -140,6 +136,7 @@ def run_nightly(
     sessions: sessionmaker[Session],
     registry: Any,
     taxonomy: Any,
+    settings: Any = None,
     as_of: datetime,
     engine: Any = None,
     offline: bool = False,
@@ -148,14 +145,16 @@ def run_nightly(
     top_k: int = 5,
     judge_batch_size: int = 6,
     source_ids: Sequence[str] | None = None,
+    extractor_sender: Any = None,
     judge_sender: Any = None,
     writer_sender: Any = None,
     run_ttl: bool = True,
 ) -> NightlyReport:
-    """Run every layer once and reconcile the ledger.
+    """Run every layer once, single-shot.
 
-    The gate senders are injected so the offline path can replay recorded answers and the tests can
-    use stubs; in a live run the caller passes the real provider transport.
+    The gate senders are injected so the offline path can replay recorded answers (or the
+    deterministic heuristic stand-in for extraction) and the tests can use stubs; in a
+    live run the caller passes the real provider transport.
     """
     report = NightlyReport(started_at=as_of, offline=offline, dry_run=dry_run)
     source_ids, offline_note = _resolve_offline_sources(
@@ -173,20 +172,20 @@ def run_nightly(
         clock_for=_clock_factory(fixtures_dir=fixtures_dir),
         max_items_for=_limits_factory(fixtures_dir=fixtures_dir),
         trigger="nightly",
-        resume=True,
         source_ids=list(source_ids) if source_ids else None,
         dry_run=dry_run,
     )
     report.l0_status = l0.status
     report.l0_items_new = l0.items_new
 
-    # --- L1/L3: mine and score ----------------------------------------------
+    # --- L1/L3: extract and score --------------------------------------------
     decide = run_decide(
         sessions=sessions,
         taxonomy=taxonomy,
         as_of=as_of,
         trigger="nightly",
         source_ids=list(source_ids) if source_ids else None,
+        sender=extractor_sender,
         dry_run=dry_run,
         top=top_k,
     )
@@ -194,19 +193,19 @@ def run_nightly(
     report.candidates_scored = decide.scoring.scored
 
     # --- L2: enrich the top-K the Judge kept (only with a Tier-A credential) -----------------
-    _record_l2(report, _run_l2(session_factory=sessions, offline=offline, dry_run=dry_run,
-                               top_k=top_k))
+    _record_l2(report, _run_l2(sessions=sessions, registry=registry, settings=settings,
+                               offline=offline, dry_run=dry_run, top_k=top_k))
 
     # --- L3: judge, then write ----------------------------------------------
     with sessions() as session:
         queue = list(pending_judgements(session, limit=judge_batch_size * 2))
-        handle = _start_run(session, "nightly")
+        run_id = open_run(session, trigger="nightly")
         session.commit()
         report.judge_status = "empty"
         if queue and judge_sender is not None:
             judged = judge_candidates(
                 session,
-                run_id=handle,
+                run_id=str(run_id),
                 sender=judge_sender,
                 candidates=queue,
                 batch_size=judge_batch_size,
@@ -226,20 +225,23 @@ def run_nightly(
             ).scalars().all()
         )
         if dry_run:
-            # Close the run this stage opened: a dry run writes nothing, but a run row left open
-            # makes health claim the system is mid-run (and a resume could pick it up).
-            finish_run(
+            # Close the run this stage opened: a dry run writes nothing, but a run row left
+            # open would read as a run that never finished.
+            close_run(
                 session,
-                str(handle),
+                run_id,
                 status="aborted",
                 notes="DRY RUN: the judge/writer stage wrote nothing",
             )
+            session.commit()
+        else:
+            close_run(session, run_id, status="ok" if kept else "empty")
             session.commit()
         report.writer_status = "empty"
         if kept and writer_sender is not None:
             written = write_briefs(
                 session,
-                run_id=handle,
+                run_id=str(run_id),
                 sender=writer_sender,
                 candidates=kept[:top_k],
                 top_k=top_k,
@@ -253,7 +255,7 @@ def run_nightly(
             report.writer_status = "skipped"
             report.notes.append("no gate transport available, so no brief was written")
 
-    # --- maintenance and accounting -----------------------------------------
+    # --- maintenance ----------------------------------------------------------
     with sessions() as session:
         if run_ttl:
             ttl = expire(session, now=as_of, dry_run=dry_run)
@@ -262,12 +264,6 @@ def run_nightly(
                 session.commit()
         else:
             report.ttl_summary = "skipped"
-        ledger = reconcile(session)
-        report.reconciliation = {
-            **ledger.as_dict(),
-            "summary": ledger.summary(),
-        }
-        report.totals = accounted_totals(session)
     return report
 
 
@@ -280,8 +276,35 @@ def _record_l2(report: NightlyReport, l2: L2Report) -> None:
         report.notes.append(l2.reason or l2.summary())
 
 
+def _tier_a_plugins(
+    registry: Any, settings: Any
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Load every enabled Tier-A plugin, with credentials injected where asked.
+
+    Returns (plugins, skipped): a source whose module is still a stub lands in skipped
+    with the reason — an enabled entry that cannot run is a configuration fact, and the
+    nightly report names it instead of silently narrowing coverage.
+    """
+    plugins: dict[str, Any] = {}
+    skipped: dict[str, str] = {}
+    for entry in registry.by_tier("A"):
+        if not entry.enabled:
+            continue
+        try:
+            plugins[entry.id] = load_plugin(entry, settings=settings)
+        except PluginContractError as exc:
+            skipped[entry.id] = f"no plugin yet: {exc}"
+    return plugins, skipped
+
+
 def _run_l2(
-    *, session_factory: Any, offline: bool, dry_run: bool, top_k: int
+    *,
+    sessions: Any,
+    registry: Any,
+    settings: Any,
+    offline: bool,
+    dry_run: bool,
+    top_k: int,
 ) -> Any:
     """Run L2 enrichment when a Tier-A source is both registered and credentialed.
 
@@ -291,7 +314,50 @@ def _run_l2(
     """
     if offline:
         return L2Report(status="skipped", reason="offline run: Tier-A sources need a network")
-    return L2Report(status="skipped", reason="no Tier-A plugin wired into the nightly driver yet")
+    plugins, skipped = _tier_a_plugins(registry, settings)
+    if not plugins:
+        return L2Report(status="skipped", reason="no enabled Tier-A plugin to run")
+    by_id = {entry.id: entry for entry in registry.by_tier("A")}
+    budgets = {
+        source_id: SourceBudget(
+            source_id=source_id,
+            budget_per_day=by_id[source_id].budget_per_day,
+            rps=by_id[source_id].rps,
+            clock=SystemClock(),
+        )
+        for source_id in plugins
+    }
+
+    def client_for(source_id: str) -> Any:
+        return HttpxClient(
+            source_id=source_id,
+            allowed_domains=by_id[source_id].domains,
+            policy=HttpPolicy(timeout_s=30.0),
+        )
+
+    with sessions() as session:
+        run_id = open_run(session, trigger="nightly")
+        session.commit()
+        report = enrich_candidates(
+            session,
+            run_id=run_id,
+            plugins=plugins,
+            source_ids=[entry.id for entry in registry.by_tier("A") if entry.id in plugins],
+            top_k=top_k,
+            budgets=budgets,
+            dry_run=dry_run,
+            client_for=client_for,
+            clock=SystemClock(),
+            context_factory=FetchContext,
+        )
+        for source_id, reason in skipped.items():
+            report.skipped_sources[source_id] = reason
+        if not dry_run:
+            session.commit()
+        else:
+            close_run(session, run_id, status="aborted", notes="DRY RUN: L2 wrote nothing")
+            session.commit()
+    return report
 
 
 def _offline_sources(fixtures_dir: Path, registry: Any) -> list[str]:
@@ -334,16 +400,10 @@ def _run_ttl(session: Session, *, as_of: datetime, dry_run: bool) -> Any:
     return expire(session, now=as_of, dry_run=dry_run)
 
 
-def _start_run(session: Session, trigger: str) -> uuid.UUID:
-    """Open a run row for the gate phases, so their spend has somewhere to live."""
-    handle = start_run(session, trigger=trigger, resume=True)
-    return uuid.UUID(str(handle.run_id))
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m scripts.nightly",
-        description="Run every pipeline layer once, then reconcile the ledger.",
+        description="Run every pipeline layer once, single-shot.",
     )
     parser.add_argument(
         "--offline", action="store_true", help="fixtures and recorded gate answers"
@@ -374,23 +434,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     fixtures_dir = Path(args.fixtures) if args.offline else None
-    judge_sender: Any = None
-    writer_sender: Any = None
-    if args.offline:
-        try:
-            judge_sender = replay_sender(
-                load_fixture(JUDGE_FIXTURE), schema=JudgeBatch, covered=["circ saw"]
-            )
-            writer_sender = replay_sender(
-                load_fixture(WRITER_FIXTURE), schema=WriterBrief, covered=["circ saw"]
-            )
-        except ReplayMissError as exc:
-            print(f"offline replay unavailable: {exc}", file=sys.stderr)
-            return 1
-    else:
-        transport = settings_sender(settings)
-        judge_sender = transport
-        writer_sender = transport
+    try:
+        extractor_sender, judge_sender, writer_sender = _gate_senders(
+            args, settings
+        )
+    except ReplayMissError as exc:
+        print(f"offline replay unavailable: {exc}", file=sys.stderr)
+        return 1
 
     sessions = create_session_factory(engine)
     try:
@@ -399,6 +449,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sessions=sessions,
             registry=registry,
             taxonomy=taxonomy,
+            settings=settings,
             as_of=as_of,
             engine=engine,
             offline=args.offline,
@@ -407,6 +458,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             top_k=args.top_k,
             judge_batch_size=args.judge_batch_size,
             source_ids=args.source or None,
+            extractor_sender=extractor_sender,
             judge_sender=judge_sender,
             writer_sender=writer_sender,
             run_ttl=not args.no_ttl,
@@ -421,7 +473,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         briefs = stored_briefs_count(sessions)
         if briefs:
             print(f"  briefs on file: {briefs}")
-    return 0 if report.balanced else 1
+    return 0 if report.ok else 1
+
+
+def _gate_senders(args: Any, settings: Any) -> tuple[Any, Any, Any]:
+    """The three gate transports: replayed or heuristic offline, live otherwise.
+
+    Extraction has no recorded answers for arbitrary lake chunks, so the offline path
+    uses the deterministic heuristic stand-in: valid refs, no spend, plumbing only.
+    """
+    if args.offline:
+        return (
+            heuristic_sender(),
+            replay_sender(
+                load_fixture(JUDGE_FIXTURE), schema=JudgeBatch, covered=["circ saw"]
+            ),
+            replay_sender(
+                load_fixture(WRITER_FIXTURE), schema=WriterBrief, covered=["circ saw"]
+            ),
+        )
+    transport = settings_sender(settings)
+    return transport, transport, transport
 
 
 def _resolve_as_of(sessions: sessionmaker[Session]) -> datetime:

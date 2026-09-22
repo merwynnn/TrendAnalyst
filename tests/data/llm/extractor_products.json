@@ -1,0 +1,30 @@
+{
+  "completion_tokens": 142,
+  "gate": "extractor",
+  "model": "gemini-3.6-flash",
+  "output": {
+    "products": [
+      {
+        "category": "tools_diy",
+        "doc_ids": [0, 1],
+        "phrase": "circ saw blade guard",
+        "reason": "Two texts complain about the same failing part on circular saws."
+      },
+      {
+        "category": "home_office",
+        "doc_ids": [2],
+        "phrase": "desk mat",
+        "reason": "Someone asks which desk mat survives heavy use."
+      },
+      {
+        "category": "tools_diy",
+        "doc_ids": [3],
+        "phrase": "chisel storage",
+        "reason": "A woodworker wishes a wall-mounted chisel rack existed."
+      }
+    ]
+  },
+  "prompt_tokens": 1180,
+  "recorded_at": "2026-09-21T12:00:00+00:00",
+  "source": "hand-written golden fixture for the Extractor gate (no provider call)"
+}

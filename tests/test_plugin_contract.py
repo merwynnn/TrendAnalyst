@@ -482,11 +482,11 @@ def test_plugin_must_implement_fetch_and_parse() -> None:
 
 
 def test_load_plugin_reports_a_module_with_no_plugin_yet(repo_root: Path) -> None:
-    """Most plugin modules are still stubs; the loader must say which source, precisely."""
+    """Remaining stub modules must fail loudly; the loader must say which source, precisely."""
     registry = load_registry(repo_root / "config" / "sources.yaml")
-    entry = registry.by_id("gdelt_doc")  # P1 implements hn/wiki/arctic_shift only
+    entry = registry.by_id("google_books")  # deferred: throttled network, documented in-stub
 
-    with pytest.raises(PluginContractError, match="defines no SourcePlugin with id='gdelt_doc'"):
+    with pytest.raises(PluginContractError, match="defines no SourcePlugin with id='google_books'"):
         load_plugin(entry)
 
 

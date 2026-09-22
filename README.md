@@ -17,16 +17,18 @@ Judge, Writer) with hard budgets.
 
 | Phase | Scope | State |
 |---|---|---|
-| **P0** | Skeleton, layered config, `sources.yaml` registry (+Tier-A-in-L0 hard-fail), Postgres models + first migration, health CLI | **done** — see [`docs/evidence/P0.md`](docs/evidence/P0.md) (outcome) and [`P0-gate.md`](docs/evidence/P0-gate.md) (raw gate output) |
-| **P1** | L0 collectors (HN, Wikipedia, Arctic Shift) + run ledger, watermarks, content-hash dedup, kill-and-resume | **done** — see [`docs/evidence/P1.md`](docs/evidence/P1.md) (outcome) and [`P1-gate.md`](docs/evidence/P1-gate.md) (raw gate output) |
-| **P2** | L1 mining + scoring v1: phrase extraction, per-category EWMA z-scores, 95% prune, MGS in code, fad flag, Monte Carlo revenue, 10 golden eval cases | **done** — see [`docs/evidence/P2.md`](docs/evidence/P2.md) (outcome) and [`P2-gate.md`](docs/evidence/P2-gate.md) (raw gate output) |
+| **P0** | Skeleton, layered config, `sources.yaml` registry (+Tier-A-in-L0 hard-fail), Postgres models + first migration | **done** — see [`docs/evidence/P0.md`](docs/evidence/P0.md) (outcome) and [`P0-gate.md`](docs/evidence/P0-gate.md) (raw gate output) |
+| **P1** | L0 collectors + run log, per-source cursors, content-hash dedup | **done** — see [`docs/evidence/P1.md`](docs/evidence/P1.md) (outcome) and [`P1-gate.md`](docs/evidence/P1-gate.md) (raw gate output). Kill-and-resume and the quota ledger were removed in the cleanup; runs are single-shot |
+| **P9** | **Source expansion** — 8 more Tier-S collectors live (Mastodon, WordPress, Suggest, Shopify, iTunes, OpenAlex, itch.io) + GDELT plugin written (fixture blocked on their throttle) | **done** — each with recorded fixtures and contract tests; lake grew 3k → 5.5k signals/night. Bluesky (403 block), Google Books (persistent 429) and Common Crawl (URL index can't do full-text) stay documented stubs; Steam skipped per instruction; Product Hunt plugin written, awaiting one live API answer |
+| **P2** | L1 mining + scoring v1: per-category EWMA z-scores, 95% prune, MGS in code, fad flag, Monte Carlo revenue, 10 golden eval cases | **done, then replaced** — deterministic n-gram mining was superseded by the LLM Extractor gate (below); scoring, prune economics and evals unchanged. See [`docs/evidence/P2.md`](docs/evidence/P2.md) (outcome) and [`P2-gate.md`](docs/evidence/P2-gate.md) (raw gate output) |
 | **P3** | LLM gates: provider chain with failover, per-gate budgets, 30-day cache, Pydantic schemas, code-enforced grounding, the Judge gate and its append-only `judgements` | **done** — see [`docs/evidence/P3.md`](docs/evidence/P3.md) (outcome), [`P3-drill.txt`](docs/evidence/P3-drill.txt) (live drill) and [`P3-gate.md`](docs/evidence/P3-gate.md) (raw gate) |
-| **P4** | L2 enrichment (eBay Browse, on-demand, top-K), briefs, snapshot history views, TTL jobs, and the nightly run with reconciliation to zero unexplained spend | **done** — see [`docs/evidence/P4.md`](docs/evidence/P4.md) (outcome) and [`P4-gate.md`](docs/evidence/P4-gate.md) (raw gate). L2 is unvalidated against live eBay: no credentials yet, and the doc says so |
-| **P5** | AGENT.md + USER_SETUP.md to bar, 50 golden evals, CI, monitor dry-run | **done** — `AGENT.md` (5 runbooks, 3 tiers, escalation + rollback), `USER_SETUP.md` (11-key table, 2 schedulers, $0 cost table, 5 failure modes), 50 golden cases, `monitor/alerts.py` + `monitor/drift.py`, 7 incidents rehearsed against staging (`docs/evidence/P5-runbooks.md`), CI + nightly workflows. Evidence: `docs/evidence/P5.md` |
-| **P6** | **Results explorer** — one self-contained interactive HTML page with maximum detail per item: every named source that mentioned it with quotes and URLs, all five sub-scores with their inputs, the full feature vector, the fad features, the Monte Carlo assumptions, score history per weights version, run/gate status, the Writer's brief with its citations and grounding state, and an explicit "still missing" panel for the phases that have not run | **done** — `uv run python -m trend_analyst.viewer.build --out docs/viewer/index.html`; deep-link an item with `#item=<phrase>`, add `--all-runs` to span every decide run. Facts the page must state rather than imply (a brief scored in an older run, golden cases that exist) appear in an "About this page" panel |
-| **P7** | **Top of the funnel** — a candidate must be a product phrase, not a sentence fragment: head-noun rule, a shared product-form vocabulary, a brand blocklist, a document-level language gate, and a ledger line that names every rejection reason | **done** — 10 of 10 candidates in the final live run are product nouns (was 2 of 25); fragment share of Judge drops 67% → 0–20%; Judge keep rate 17% → 38%. Evidence: `docs/evidence/P7.md` |
+| **P4** | L2 enrichment (eBay Browse, on-demand, top-K), briefs, snapshot history views, TTL jobs, and the single-shot nightly run (the quota-ledger reconciliation step was removed in the cleanup) | **done** — see [`docs/evidence/P4.md`](docs/evidence/P4.md) (outcome) and [`P4-gate.md`](docs/evidence/P4-gate.md) (raw gate). L2 is unvalidated against live eBay: no credentials yet, and the doc says so |
+| **P5** | AGENT.md + USER_SETUP.md to bar, 50 golden evals, CI, monitor dry-run | **done** — `AGENT.md` (5 runbooks, 3 tiers, escalation + rollback), `USER_SETUP.md` (11-key table, 2 schedulers, $0 cost table, 5 failure modes), 50 golden cases, CI + nightly workflows. Evidence: `docs/evidence/P5.md`. (The alert inbox, drift checks and staging runbook drill were removed in the cleanup as later-stage machinery) |
+| **P6** | **Results explorer** — one self-contained interactive HTML page per item | **removed** in the cleanup (code + generated HTML deleted; `orchestrator --rank` and `--history` cover the need for now) |
+| **P7** | **Top of the funnel** — a candidate must be a product phrase, not a sentence fragment | **done, then replaced** — the head-noun rule, product-form vocabulary, brand blocklist and language gate bought 10/10 product nouns, but a word list cannot keep up with language. The Extractor gate (below) replaces the whole layer; P7's fragment suite survives as its regression cases. Evidence: `docs/evidence/P7.md` |
+| **P8** | **Extractor gate** — the LLM reads lake texts in ~30-text chunks and returns grounded products (`phrase, category, doc_ids`); code drops invented refs, ranks by velocity, prunes 95% | **done** — deterministic mining, taxonomy matching and the coverage script deleted; per-model Gemini chain (6 ids) for quota spread; replay deterministic via the 30-day chunk cache. Evidence: `tests/data/llm/extractor_products*.json` + `tests/test_extract.py` |
 
-Gate: `bash scripts/gate.sh` — 19 checks, currently **PASS (0 pending)**. Run it after any
+Gate: `bash scripts/gate.sh` — 16 checks, currently **PASS (0 pending)**. Run it after any
 change; it regenerates `docs/evidence/P7-gate.md` with raw output instead of a claim.
 
 Task tracking lives in `beans` (`.beans/`), not in this file: `beans list --ready`.
@@ -80,9 +82,9 @@ uv run pytest -m "not db"    # no database, no network
 uv run ruff check .
 uv run mypy src config
 
-# 4. Health (spec §9)
-uv run python -m trend_analyst.health
-uv run ta-health --json
+# 4. Smoke test — the whole pipeline on fixtures, then the ranked table
+uv run python -m scripts.nightly --offline --dry-run
+uv run python -m trend_analyst.pipeline.orchestrator --rank
 ```
 
 Credentials live in `config/secrets.local.yaml` (untracked, template:
@@ -91,8 +93,9 @@ layer, used by CI — never the place secrets are kept.
 
 ## Layout
 
-`src/trend_analyst/` follows the spec (§3) exactly: `pipeline/` (+ `layers/`),
-`sources/` (+ `tier_s/`, `tier_a/`), `scoring/`, `llm/`, `store/`, `monitor/`.
+`src/trend_analyst/` follows the spec (§3): `pipeline/` (+ `runs.py`, `layers/`),
+`sources/` (+ `tier_s/`, `tier_a/`), `scoring/`, `llm/`, `store/`.
+(`monitor/` and the results `viewer/` were removed in the cleanup.)
 Modules that belong to a later phase exist now as **typed stubs that document their
 phase and export nothing** — never as silent no-ops.
 
@@ -105,21 +108,19 @@ decision the human approved or an addition the spec layout does not name.
 |---|---|---|
 | D1 | Runtime interpreter is the **system Python 3.14.6**, not 3.12 (spec §11) | Human instruction: "use the python installed on the system, do not install another python." Code stays 3.12-portable: `ruff target-version = py312` and `mypy python_version = 3.12` reject 3.13+ syntax. |
 | D2 | `config/` is an importable package (`config/settings.py` per spec §3 lives outside `src/`) | Decision B2a — keeps every spec path while allowing type-checked imports. |
-| D3 | `src/trend_analyst/health.py` exists alongside `monitor/health.py` | Spec conflict C1: §3 puts health in `monitor/`, §9 mandates `python -m trend_analyst.health`. The shim re-exports; both hold. |
 | D4 | `src/trend_analyst/logging.py`, `config/cli.py`, `docs/`, `alembic.ini`, `.github/`, `tests/*/` subpackages | The spec layout has no home for structured logging, a config inspector, evidence logs, migrations config or CI. Additions only. |
 | D5 | Dossiers moved from the repo root to `docs/dossiers/` | Spec §3: "nothing ad-hoc at root". |
 | D6 | `config/secrets.local.yaml` is the credential store (env vars remain an optional override) | Human instruction B4: "don't put the api keys on environment variable, let them in a file". Spec §10 allows either. |
-| D7 | Postgres runs in WSL (Ubuntu 26.04, PG 18 + pgvector) and is held up by `scripts/db_up.sh` | Human decision B1a. WSL terminates idle distros (measured), so a parked `sleep infinity` keeps it reachable — the alternative, a native Windows build, cannot install pgvector without an MSVC toolchain. |
+| D7 | Postgres runs on Neon cloud (PG 18 + pgvector), not in WSL | Superseded September 2026: the WSL cluster (Ubuntu 26.04, PG 18) kept dying on idle shutdown and taking the localhost relay with it. Native Windows PG was rejected as too heavy; pgvector ships no upstream Windows binaries (and nothing here uses vector columns anyway). Neon is zero-install with pgvector included — only the DSN changed. The WSL scripts (`provision_pg.sh`, `db_up.sh`) and cluster remain as fallback, not the path. |
 | D9 | `src/trend_analyst/net.py` — the HTTP client, egress allowlist and fixture replay | The spec layout has no home for network plumbing; plugins must not choose their own transport (spec §10) |
 | D12 | `judgements` table (migration 0002) — §6.2's cited keep/drop verdicts have no home in the §7 table list, and the LLM cache expires in 30 days, so the advice would die while the decision it justified lived on | The Judge's output is durable, append-only and queryable, with its citations and token counts |
 | D14 | `judgements` gets a table (D12) and the `HttpClient` contract gained a `post` method | eBay's OAuth token endpoint is a POST, and the plugin contract was written for GET-only sources. A fake GET token endpoint would have been pinned by a fixture and exposed by the first live run |
 | D15 | `store/history.py` and `store/ttl.py` (spec §3 lists neither) | §5.3 requires the snapshot table to be *read* for trends and §5.4 requires a TTL job; the layout has no home for either. `history.py` reads, `ttl.py` expires, and both live in `store/` with the tables they describe |
 | D13 | A second Gemini model in the provider chain | The live drill produced a real 503 "experiencing high demand" on the first model while small requests succeeded, and with Groq unkeyed and Cerebras unfunded (402) one model per provider meant a gate outage. The distinct-provider order is still Gemini → Groq → Cerebras → Ollama |
-| D16 | A **`skipped`** source status in health, distinct from `degraded` (spec §9 lists ok/degraded/down) | A source that declares why it could not run — no key, no fixture for an offline replay — is a coverage fact, not an incident. Reporting twelve keyless sources as `degraded` made health `exit 1` on a working system, which is how a monitor learns to ignore health |
-| D17 | The staging database (`trend_analyst_staging`) and `scripts/staging_db.sh`, created by the runbook drill and dropped when it finishes | §8 asks for a monitor dry-run "against staging". Creating a database needs `CREATEDB`, which the application role deliberately lacks, so the create/drop lives in a shell helper run as the postgres superuser: a process holding the app DSN cannot make or destroy a database |
 | D18 | `evals/run_evals.py --relabel` as the only supported way to change a golden case's label | Seeding 50 cases surfaced two label conflicts where the Judge's reasoning was better than the phrase-quality baseline's (an n-gram fragment scoring above the keep threshold). A label must be changeable — silently editing `cases.yaml` would hide the disagreement — so moving one demands `--to` and `--reason`, and the reason is written into the case's `notes` |
-| D11 | The results explorer lives in `src/trend_analyst/viewer/` and writes one self-contained HTML file | The spec's §3 tree has no viewer, and "new code goes in the matching folder, nothing ad-hoc at root" leaves the package as its home. A served app would need auth, a port and a supervisor to answer a question a file answers |
-| D10 | `src/trend_analyst/store/sync.py` — registry mirror logic moved out of `scripts/` | The orchestrator needs it before a run (a watermark lives on the source row), and `src/` must not import from `scripts/` |
+| D10 | `src/trend_analyst/store/sync.py` — registry mirror logic moved out of `scripts/` | The orchestrator needs it before a run (a cursor lives on the source row), and `src/` must not import from `scripts/` |
+| D19 | The monitor (`monitor/`, health CLI, alert inbox, staging drill), the results viewer, the quota ledger with its resume/CAS machinery, and the runbook drill are deleted | Later-stage machinery the current pipeline does not need. Runs are single-shot; per-source cursors are the only cross-run memory. Spec §3 layout entries for the deleted modules no longer apply |
+| D20 | L1 is an LLM gate (Extractor), not deterministic code | N-gram mining produced fragments more often than products (P7: 67% of Judge drops) and the taxonomy silently deleted real finds. The gate reads ~30-text chunks under per-gate budgets, refs are grounded in code, velocity/prune/scoring stay deterministic, and `--fixtures`/`--offline` run on an honest heuristic stand-in. New code in `llm/extract.py`; `llm_cache` CHECK widened (migration 0004); chain spread over per-model Gemini quotas (live-probed) |
 | D8 | The DSN uses `127.0.0.1`, never `localhost` | On Windows `localhost` resolves to IPv6 `::1` FIRST, and WSL's port relay black-holes `::1`: every connection then burned 130 s before falling back to IPv4 (measured: 130.09 s as `localhost`, 0.06 s as `127.0.0.1`). Same reason `migrations/env.py` sets `connect_timeout` and `lock_timeout` — a migration must fail fast, never hang. |
 
 ## Rules of the road

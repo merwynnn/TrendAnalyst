@@ -8,7 +8,7 @@ Rules (build brief §2, §7):
 
 Database tests run against a SEPARATE database (`trend_analyst_test`), never the dev one:
 that is what makes it safe for a test to migrate all the way up and back down again.
-Both databases are created by `scripts/provision_pg.sh`.
+Both databases live on Neon (see USER_SETUP.md §1); the WSL scripts remain as fallback.
 """
 
 from __future__ import annotations
@@ -56,8 +56,8 @@ def _test_database_url(repo_root: Path) -> str:
     settings = load_settings(repo_root / "config", env_name="dev")
     if not settings.db.configured:
         pytest.fail(
-            "no database URL: run `bash scripts/provision_pg.sh` (it writes db.url into "
-            "config/secrets.local.yaml), or set TA_TEST_DB_URL. "
+            "no database URL: paste the Neon DSN as db.url into "
+            "config/secrets.local.yaml (USER_SETUP.md §1), or set TA_TEST_DB_URL. "
             "Use `pytest -m 'not db'` to run without a database."
         )
     url = make_url(settings.db.dsn).set(database=TEST_DATABASE_NAME)
@@ -76,7 +76,7 @@ def db_url(repo_root: Path) -> str:
         pytest.fail(
             f"test database unreachable at {make_url(url).render_as_string(hide_password=True)} "
             f"({type(exc).__name__}: {exc}).\n"
-            "Fix: bash scripts/db_up.sh && wsl -d Ubuntu -u root -- bash scripts/provision_pg.sh"
+            "Fix: check the Neon DSN in config/secrets.local.yaml (USER_SETUP.md §1)"
         )
     finally:
         probe.dispose()

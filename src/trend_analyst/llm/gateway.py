@@ -28,13 +28,7 @@ from typing import Any, Final, Literal
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from trend_analyst.llm.cache import (
-    DEFAULT_TTL_DAYS,
-    cache_key,
-    get_cached,
-    put_cached,
-    record_tokens,
-)
+from trend_analyst.llm.cache import DEFAULT_TTL_DAYS, cache_key, get_cached, put_cached
 from trend_analyst.llm.schemas import (
     GateName,
     enforce_grounding,
@@ -72,12 +66,18 @@ __all__ = [
 #: exactly why the brief asks for one live run.
 DEFAULT_CHAIN: Final[tuple[tuple[str, str], ...]] = (
     ("gemini", "gemini-flash-latest"),
-    # A second model from the same provider, and the live drill is why: Gemini answered 200 for
-    # small requests while returning HTTP 503 "experiencing high demand" for the drill's ~450-token
-    # prompt, consistently, for minutes. One model per provider is a single point of failure that
-    # the spec's chain cannot fail over from, because the next link (Groq) has no key here and the
-    # one after it (Cerebras) answers 402. The order still leads with the spec's first provider.
+    # One model per provider is a single point of failure, and Gemini's free tier is rate-limited
+    # PER MODEL — so the chain spreads across the model family newest-first, and a 503/429 on one
+    # id fails over to the next id with its own quota bucket. Live evidence for every entry:
+    # the 2026-09-21 model probe answered 200 for flash-latest, 3.6-flash, 3.5-flash and
+    # 3.5-flash-lite, while 3.8-flash and 3.7-flash answered 503 "high demand" (real ids,
+    # temporarily overloaded — exactly what transient retry plus failover exists for). A 404
+    # would have meant a wrong id and immediate removal; a models-list entry is not trusted
+    # until generateContent answers (LESSONS §6.2).
+    ("gemini", "gemini-3.8-flash"),
+    ("gemini", "gemini-3.7-flash"),
     ("gemini", "gemini-3.6-flash"),
+    ("gemini", "gemini-3.5-flash"),
     # The high-rate-limit workhorse: "flash-lite" tiers allow far more requests per day than the
     # full models, which matters because the free tier is the binding constraint on a nightly run
     # (LESSONS §6.5: a day of drilling exhausted the quota). It sits after the stronger models so
@@ -142,10 +142,14 @@ class GateBudget:
 #: The nightly budgets from spec §6.2: Judge is batched (~20 calls), Writer is top-K (~30),
 #: the Planner runs weekly (~1). Token caps are the §6.3 "token caps" and are deliberately
 #: generous per call but small per day: they exist to stop a runaway loop, not to ration.
+#: The Extractor reads the whole lake in ~30-text chunks (now ~150 chunks, ~400k tokens
+#: a night), spread over the per-model chain below — the caps are backstops above that,
+#: not rations. ~25 calls per model per night fits per-model free-tier quotas when paced.
 DEFAULT_BUDGETS: Final[dict[str, GateBudget]] = {
     "planner": GateBudget(gate="planner", calls_per_day=4, tokens_per_day=60_000),
     "judge": GateBudget(gate="judge", calls_per_day=25, tokens_per_day=400_000),
     "writer": GateBudget(gate="writer", calls_per_day=40, tokens_per_day=600_000),
+    "extractor": GateBudget(gate="extractor", calls_per_day=200, tokens_per_day=1_000_000),
 }
 
 
@@ -228,6 +232,7 @@ def call_gate(
     now: datetime | None = None,
     dry_run: bool = False,
     bypass_cache: bool = False,
+    write_cache: bool = True,
 ) -> GatewayOutcome:
     """Run one gate call through cache, caps, chain, schema and grounding.
 
@@ -244,6 +249,9 @@ def call_gate(
         bypass_cache: skip the cache read (and still write), for a replay that must exercise the
             whole path. Without it, a second replay is served from the cache and its accounting
             columns read zero — which made a gate probe assert token counts that proved nothing.
+        write_cache: skip the cache write while still calling. The offline heuristic stand-in
+            passes False: its answers must never sit in the cache where a live run could read
+            them as model output.
     """
     providers = tuple(chain) if chain is not None else default_chain()
     limits = budget or DEFAULT_BUDGETS[gate]
@@ -332,7 +340,7 @@ def call_gate(
 
             assert outcome.value is not None  # parse_gate_output guarantees it when ok
             cleaned, removed = _ground(outcome.value, evidence_urls)
-            if not dry_run:
+            if write_cache and not dry_run:
                 put_cached(
                     session,
                     key,
@@ -343,15 +351,6 @@ def call_gate(
                     completion_tokens=completion_tokens,
                     now=now,
                     ttl_days=DEFAULT_TTL_DAYS,
-                )
-                record_tokens(
-                    session,
-                    gate=gate,
-                    model=provider.model,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    cache_key_value=key,
-                    run_id=run_id,
                 )
             return GatewayOutcome(
                 status="ok",

@@ -6,8 +6,8 @@ That sentence is a pair of rules, and both halves matter:
 
 * **The raw lake expires.** It is a reference to a payload that has already been parsed into
   signals — keeping it forever would grow the database for evidence nobody reads twice.
-* **Scores, judgements, briefs and the quota ledger never expire.** They are the system's memory:
-  the trend of a candidate, the advice it received, the spend it caused. A deletion here would be
+* **Scores, judgements and briefs never expire.** They are the system's memory:
+  the trend of a candidate and the advice it received. A deletion here would be
   silent history loss, so `expire()` touches exactly two tables and asserts as much.
 
 The LLM cache is a third case: it has its own 30-day TTL (spec §6.3) and is swept by the same job
@@ -33,7 +33,7 @@ DEFAULT_RAW_TTL_DAYS = 90
 
 #: The tables the TTL job must never touch, named here so a future edit has to argue with a test
 #: rather than with a comment.
-PROTECTED = ("scores", "judgements", "briefs", "quota_ledger", "signals", "runs")
+PROTECTED = ("scores", "judgements", "briefs", "signals", "runs")
 
 
 @dataclass(frozen=True, slots=True)

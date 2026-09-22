@@ -3,24 +3,25 @@
 L0 collects; L1 mines; L3 scores. Each layer's own module holds its logic — this file owns
 the CLI, the layer selection and the L0 loop below.
 
-The loop is deliberately dull — deterministic code, checkpoints, no agent framework:
+The loop is deliberately dull — deterministic code, no agent framework:
 
 for each enabled L0 source, in the order config/sources.yaml lists them:
-    leash -> fetch -> dedup by content hash -> parse -> store -> watermark -> ledger
+    leash -> fetch (since the stored cursor) -> dedup by content hash -> parse ->
+    store -> advance cursor -> log row
 
-Four properties are the reason this file exists:
+Three properties are the reason this file exists:
 
 1. **File order is execution order** (spec §4.2). The registry decides; nothing here has
    an opinion about which source matters.
 2. **A source that fails does not stop the run** (§4.3). Its failure is recorded with the
    reason and the loop continues, because one dead endpoint must not cost a night's data.
 3. **Identical payloads are not parsed twice** (§5.2). The content hash decides, and the
-   ledger records zero new items — which is what makes a second run cheap.
-4. **A resume executes only unfinished work** (§5.4). "Finished" is a query against the
-   ledger, so it survives a crash: `run_l0()` after `run_l0()` picks up where it stopped.
+   log records zero new items — which is what makes a second run cheap.
 
-Quota spend is written to `quota_ledger` under a compare-and-swap key per (run, source),
-so re-running a source — exactly what a resume does — cannot charge it twice.
+Single-shot by design: every call opens a fresh run row and runs every requested source.
+A crash means re-running from scratch — dedup (content hash) and idempotent signal
+inserts make the re-run cheap. There is no resume and no quota ledger; the per-source
+cursor is the only cross-run memory.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -40,7 +42,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from config.categories import TaxonomyError, default_taxonomy
 from config.settings import ConfigError, default_config_dir, load_settings
-from trend_analyst.llm.gates import judge_candidates, pending_judgements
+from trend_analyst.llm.extract import heuristic_sender
+from trend_analyst.llm.gates import ensure_replay_candidate, judge_candidates, pending_judgements
 from trend_analyst.llm.providers import settings_sender
 from trend_analyst.llm.replay import ReplayMissError, load_fixture, replay_sender
 from trend_analyst.llm.schemas import JudgeBatch, JudgeVerdict, WriterBrief
@@ -57,18 +60,7 @@ from trend_analyst.net import (
 from trend_analyst.pipeline.briefs import render_briefs_table
 from trend_analyst.pipeline.decide import read_ranked, run_decide
 from trend_analyst.pipeline.layers.l1 import DEFAULT_MIN_KEEP, DEFAULT_PRUNE_FRACTION
-from trend_analyst.pipeline.state import (
-    RunHandle,
-    advance_watermark,
-    finish_run,
-    pending_sources,
-    read_watermark,
-    record_source_result,
-    record_spend,
-    restore_budgets,
-    spent_today,
-    start_run,
-)
+from trend_analyst.pipeline.runs import close_run, open_run, read_cursor, write_cursor
 from trend_analyst.sources.base import (
     HTTP_CLIENT_ERROR,
     FetchContext,
@@ -93,7 +85,7 @@ from trend_analyst.store.db import (
     create_session_factory,
 )
 from trend_analyst.store.history import compare_versions, history, history_delta, render_history
-from trend_analyst.store.models import Candidate, RawItem, SignalRow
+from trend_analyst.store.models import Candidate, RawItem, RunSourceLog, SignalRow
 from trend_analyst.store.sync import sync_sources
 
 __all__ = ["RunReport", "SourceOutcome", "collect_one", "run_l0"]
@@ -281,14 +273,13 @@ def collect_one(  # noqa: PLR0911 — one return per outcome is clearer than a s
     dry_run: bool = False,
 ) -> SourceOutcome:
     """Fetch and store one source. Never raises for a source-level problem."""
-    cursor = read_watermark(session, entry.id)
     ctx = FetchContext(
         run_id=run_id,
         source_id=entry.id,
         client=client,
         budget=budget,
         clock=clock,
-        cursor=cursor,
+        cursor=read_cursor(session, entry.id),
         max_items=max_items,
     )
 
@@ -322,14 +313,14 @@ def collect_one(  # noqa: PLR0911 — one return per outcome is clearer than a s
 
     if batch.not_modified:
         if not dry_run:
-            advance_watermark(session, entry.id, batch.cursor)
+            write_cursor(session, entry.id, batch.cursor)
         return SourceOutcome(
             source_id=entry.id,
             status="ok",
             quota_spent=spent,
             rate_limit_hits=hits,
             not_modified=True,
-            reason="the source reports nothing new since the watermark",
+            reason="the source reports nothing new",
         )
 
     if not batch.parts:
@@ -344,7 +335,7 @@ def collect_one(  # noqa: PLR0911 — one return per outcome is clearer than a s
     seen_hashes = _recent_hashes(session, entry.id)
     if batch.is_unchanged_since(seen_hashes):
         if not dry_run:
-            advance_watermark(session, entry.id, batch.cursor)
+            write_cursor(session, entry.id, batch.cursor)
         return SourceOutcome(
             source_id=entry.id,
             status="ok",
@@ -357,7 +348,7 @@ def collect_one(  # noqa: PLR0911 — one return per outcome is clearer than a s
     signals = plugin.parse(batch)
     if dry_run:
         # A dry run does the work and reports it, but writes nothing at all — no lake row,
-        # no signals, no watermark. `items_new` is what a real run would have stored.
+        # no signals, no cursor advance. `items_new` is what a real run would have stored.
         return SourceOutcome(
             source_id=entry.id,
             status="ok",
@@ -373,7 +364,8 @@ def collect_one(  # noqa: PLR0911 — one return per outcome is clearer than a s
     # than a UniqueViolation that would take the source down with it.
     _store_raw(session, run_id=run_id, batch=batch)
     new_signals = _store_signals(session, signals)
-    advance_watermark(session, entry.id, batch.cursor)
+    if not dry_run:
+        write_cursor(session, entry.id, batch.cursor)
 
     degraded = any(code >= HTTP_CLIENT_ERROR for code in batch.status_codes) or hits > 0
     return SourceOutcome(
@@ -388,38 +380,41 @@ def collect_one(  # noqa: PLR0911 — one return per outcome is clearer than a s
     )
 
 
-def _record_outcome(
-    session: Session, *, run_id: str, outcome: SourceOutcome, operation: str
-) -> None:
-    """Persist one outcome: quota first (CAS), then the ledger row."""
-    if outcome.quota_spent > 0:
-        recorded = record_spend(
-            session,
-            source_id=outcome.source_id,
+def _record_outcome(session: Session, *, run_id: uuid.UUID, outcome: SourceOutcome) -> None:
+    """Persist one outcome as a plain log row for this run."""
+    session.add(
+        RunSourceLog(
             run_id=run_id,
-            operation=operation,
-            amount=outcome.quota_spent,
-            reason=outcome.status,
+            source_id=outcome.source_id,
+            status=outcome.status,
+            items_fetched=outcome.items_fetched,
+            items_new=outcome.items_new,
+            quota_spent=outcome.quota_spent,
+            rate_limit_hits=outcome.rate_limit_hits,
+            reason=outcome.reason,
+            finished_at=datetime.now(UTC),
         )
-        if not recorded:
-            log_event(
-                log,
-                "quota.already_recorded",
-                source_id=outcome.source_id,
-                run_id=run_id,
-                note="a resumed run re-issued a spend that is already in the ledger",
-            )
-    record_source_result(
-        session,
-        run_id=run_id,
-        source_id=outcome.source_id,
-        status=outcome.status,
-        items_fetched=outcome.items_fetched,
-        items_new=outcome.items_new,
-        quota_spent=outcome.quota_spent,
-        rate_limit_hits=outcome.rate_limit_hits,
-        reason=outcome.reason,
     )
+    session.flush()
+
+
+def _fresh_budgets(
+    registry: Registry,
+    *,
+    source_ids: Sequence[str],
+    make_clock: Callable[[SourceEntry], Any],
+) -> dict[str, SourceBudget]:
+    """One leash per source, starting from zero. Budgets limit a single run only."""
+    budgets: dict[str, SourceBudget] = {}
+    for source_id in source_ids:
+        entry = registry.by_id(source_id)
+        budgets[source_id] = SourceBudget(
+            source_id=entry.id,
+            budget_per_day=entry.budget_per_day,
+            rps=entry.rps,
+            clock=make_clock(entry),
+        )
+    return budgets
 
 
 def run_l0(
@@ -432,42 +427,36 @@ def run_l0(
     clock_for: Callable[[SourceEntry], Any] | None = None,
     max_items_for: Callable[[SourceEntry], int | None] | None = None,
     trigger: str = "nightly",
-    resume: bool = True,
     source_ids: Sequence[str] | None = None,
-    max_sources: int | None = None,
     dry_run: bool = False,
 ) -> RunReport:
     """Run L0 for every enabled L0 source (or the requested subset), in registry order.
+
+    Single-shot: a fresh run row is opened and every requested source runs. A crash
+    means calling again from scratch — dedup and idempotent inserts keep it cheap.
 
     Args:
         sessions: session factory.
         client_for: builds the HTTP client for a source. Tests pass a fixture-replaying
             factory; production passes the allowlist-enforcing httpx client.
         runner: plugin loader; defaults to `load_plugin`.
-        max_sources: stop after N sources without closing the run — how a crash is
-            simulated, and how a partially-completed run is left behind on purpose.
-        dry_run: do the work but write nothing (no lake rows, no ledger, no watermark).
+        dry_run: do the work but write nothing (no lake rows, no log rows).
     """
     make_clock = clock_for or (lambda _entry: SystemClock())
     load = runner or load_plugin
 
     with sessions() as session:
-        # A watermark lives on the source's row, so the registry mirror must exist before
-        # anything can be resumed. The sync never touches watermarks, so this is safe to
+        # The registry mirror must exist before anything runs. The sync is safe to
         # run every time.
         sync_sources(session, registry)
-        handle: RunHandle = start_run(session, trigger=trigger, resume=resume)
+        run_id = open_run(session, trigger=trigger)
         session.commit()
-        pending = pending_sources(session, handle.run_id, registry)
+        pending = tuple(entry.id for entry in registry.for_layer("L0"))
         if source_ids is not None:
             wanted = set(source_ids)
             pending = tuple(source_id for source_id in pending if source_id in wanted)
-        if max_sources is not None:
-            pending = pending[:max_sources]
 
-        budgets = restore_budgets(
-            session, registry, source_ids=pending, clock_for=make_clock
-        )
+        budgets = _fresh_budgets(registry, source_ids=pending, make_clock=make_clock)
         outcomes: list[SourceOutcome] = []
 
         for source_id in pending:
@@ -485,17 +474,15 @@ def run_l0(
                 )
                 outcomes.append(outcome)
                 if not dry_run:
-                    _record_outcome(
-                        session, run_id=handle.run_id, outcome=outcome, operation=f"l0:{source_id}"
-                    )
+                    _record_outcome(session, run_id=run_id, outcome=outcome)
                     session.commit()
                 continue
-            spent_before = spent_today(session, source_id)
+            spent_before = budget.spent_today
 
             outcome = collect_one(
                 session,
                 entry=entry,
-                run_id=handle.run_id,
+                run_id=str(run_id),
                 plugin=plugin,
                 client=client_for(entry),
                 budget=budget,
@@ -508,23 +495,21 @@ def run_l0(
             log_event(
                 log,
                 "source.collected",
-                run_id=handle.run_id,
+                run_id=str(run_id),
                 source_id=source_id,
                 status=outcome.status,
                 items_new=outcome.items_new,
             )
 
             if not dry_run:
-                _record_outcome(
-                    session, run_id=handle.run_id, outcome=outcome, operation=f"l0:{source_id}"
-                )
+                _record_outcome(session, run_id=run_id, outcome=outcome)
                 session.commit()
 
-        if max_sources is None and not dry_run:
-            status = _run_status(outcomes, registry, handle)
-            finish_run(
+        status = _run_status(outcomes)
+        if not dry_run:
+            close_run(
                 session,
-                handle.run_id,
+                run_id,
                 status=status,
                 layer_status={
                     "L0": {
@@ -535,33 +520,23 @@ def run_l0(
                 },
             )
             session.commit()
-        elif dry_run:
-            status = _run_status(outcomes, registry, handle)
-        else:
-            status = "partial"
 
         return RunReport(
-            run_id=handle.run_id,
-            resumed=handle.resumed,
+            run_id=str(run_id),
+            resumed=False,
             status=status,
             outcomes=tuple(outcomes),
         )
 
 
-def _run_status(outcomes: Sequence[SourceOutcome], registry: Registry, handle: RunHandle) -> str:
-    """One word for the run: how badly did it go?
-
-    A failed source degrades a run that otherwise worked, and fails a run that did not —
-    "everything is broken" and "one endpoint is down" must not read the same to the monitor
-    agent (spec §9).
-    """
+def _run_status(outcomes: Sequence[SourceOutcome]) -> str:
+    """One word for the run: how badly did it go?"""
     failed = sum(1 for outcome in outcomes if outcome.status == "failed")
     succeeded = sum(1 for outcome in outcomes if outcome.status == "ok")
     other = len(outcomes) - failed - succeeded
 
     if not outcomes:
-        # A resumed run whose work was already done is a success, not a failure.
-        return "ok" if handle.resumed else "degraded"
+        return "degraded"
     if failed == 0 and other == 0:
         return "ok"
     if failed == len(outcomes):
@@ -606,10 +581,9 @@ def _clock_factory(
         path = fixture_path(fixtures_dir, entry.id)
         if not path.is_file():
             # A source with no recording is one this run cannot replay (no plugin, or nobody
-            # recorded it). `restore_budgets` asks for a clock for every pending source, so being
-            # strict here would make an offline run fail on a source it was never going to call.
-            # A fixture miss during an actual fetch still raises loudly — that is the one that
-            # means the recording is incomplete.
+            # recorded it). Being strict here would make an offline run fail on a source it
+            # was never going to call. A fixture miss during an actual fetch still raises
+            # loudly — that is the one that means the recording is incomplete.
             return SystemClock()
         payload = json.loads(path.read_text(encoding="utf-8"))
         stamp = datetime.fromisoformat(str(payload["recorded_at"]))
@@ -650,16 +624,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="layers to run: L0 (collect), L1+L3 (mine, score, snapshot). L2 is P4.",
     )
     parser.add_argument("--source", action="append", default=[], help="limit to these source ids")
-    parser.add_argument(
-        "--limit", type=int, default=None, help="stop after N sources (crash drill)"
-    )
-    parser.add_argument("--no-resume", action="store_true", help="always start a new run")
     parser.add_argument("--dry-run", action="store_true", help="do not write anything")
     parser.add_argument(
         "--fixtures",
         default=None,
         metavar="DIR",
-        help="replay recorded fixtures from DIR instead of the network",
+        help="replay recorded fixtures from DIR instead of the network "
+        "(the extractor then uses the deterministic heuristic stand-in)",
     )
     parser.add_argument("--config-dir", default=None, help="directory holding sources.yaml")
     parser.add_argument("--json", action="store_true", help="machine-readable report")
@@ -669,7 +640,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--min-keep",
         type=int,
         default=DEFAULT_MIN_KEEP,
-        help="mining floor: never prune below this many candidates (brief: 95%% prune)",
+        help="ranking floor: never prune below this many candidates (brief: 95%% prune)",
     )
     parser.add_argument(
         "--prune-fraction",
@@ -688,6 +659,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--rank",
         action="store_true",
         help="print the ranked table from the snapshot history and exit",
+    )
+    # Extractor gate: live only on explicit request. Extraction costs real provider calls
+    # (~40 a night), so merely asking for a decide run must not spend quota as a side effect —
+    # and read-only commands (--briefs, --history) must never trigger it at all.
+    parser.add_argument(
+        "--extract",
+        action="store_true",
+        help="run the Extractor gate live (needs a provider key); without it (and without "
+        "--fixtures) extraction is skipped with a reason and there is nothing to score",
     )
     # Judge gate (P3). Live by default when a provider key exists; --judge-replay runs the whole
     # gate over a recorded provider answer, which needs no network and no quota.
@@ -750,11 +730,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     # Default depends on intent: a plain invocation collects, while --judge/--judge-replay should
     # not drag a full L0 run along with it (the first replay did, drowning the output).
+    # Read-only commands (--briefs/--brief/--history*) imply no layer at all: they must not
+    # collect, decide or spend as a side effect.
     if args.layers is None:
-        gate_run = bool(
-            args.judge or args.judge_replay or args.write or args.write_replay or args.briefs
+        read_only = bool(
+            args.briefs or args.brief or args.history or args.history_delta
+            or args.compare_versions
         )
-        args.layers = "L1,L3" if gate_run else "L0"
+        gate_run = bool(args.judge or args.judge_replay or args.write or args.write_replay)
+        if read_only and not gate_run:
+            args.layers = ""
+        else:
+            args.layers = "L1,L3" if gate_run else "L0"
     requested = {layer.strip().upper() for layer in args.layers.split(",") if layer.strip()}
     unknown = requested - {"L0", "L1", "L3"}
     if unknown:
@@ -841,6 +828,17 @@ def _dispatch(
             combined["l0"] = l0_payload
 
     if requested & {"L1", "L3"}:
+        # Three modes, explicit: fixtures (heuristic stand-in, no network), --extract
+        # (live provider calls, needs a key), or neither (skipped with a reason — a
+        # decide run must never spend quota as an unasked side effect).
+        extractor_sender: Any = None
+        if args.fixtures:
+            extractor_sender = heuristic_sender()
+        elif args.extract:
+            try:
+                extractor_sender = settings_sender(settings)
+            except Exception as exc:  # no key: extraction is skipped with a reason
+                print(f"extractor unavailable: {exc}", file=sys.stderr)
         decide = run_decide(
             sessions=sessions,
             taxonomy=taxonomy,
@@ -849,6 +847,7 @@ def _dispatch(
             min_keep=args.min_keep,
             prune_fraction=args.prune_fraction,
             source_ids=args.source or None,
+            sender=extractor_sender,
             dry_run=args.dry_run,
             top=args.top,
         )
@@ -903,19 +902,12 @@ def _run_judge_cli(
                 print(f"replay unavailable: {exc}", file=sys.stderr)
                 return 1, None
             recorded = JudgeVerdict.model_validate(fixture["output"])
-            named = session.execute(
-                select(Candidate).where(Candidate.phrase == recorded.phrase)
-            ).scalars().first()
+            named, materialized = ensure_replay_candidate(
+                session, phrase=recorded.phrase, category=recorded.category
+            )
             # A recording answers one phrase, so judging a night's worth of candidates with it
             # would report misses for no reason. The replay judges exactly what it can answer.
-            queue = [] if named is None else [named]
-            if named is None:
-                print(
-                    f"recording names {recorded.phrase!r}, which is not a candidate in this "
-                    "database: nothing to replay",
-                    file=sys.stderr,
-                )
-                return 1, None
+            queue = [named]
             # The gate asked its provider for a JudgeBatch, so the replay must answer with one:
             # a bare verdict object fails validation and reads as a provider outage.
             sender = replay_sender(
@@ -924,6 +916,8 @@ def _run_judge_cli(
                 covered=[str(candidate.phrase) for candidate in queue],
             )
             note = f"replayed {fixture['recorded_at']}"
+            if materialized:
+                note += " (candidate materialized from the recording, not extracted)"
         else:
             queue = list(pending_judgements(session, limit=args.judge_batch_size * 3))
             try:
@@ -937,11 +931,11 @@ def _run_judge_cli(
             print("no unjudged candidates: run --layers L0,L1,L3 first")
             return exit_code, None
 
-        handle = start_run(session, trigger="manual", resume=False)
+        run_id = open_run(session, trigger="manual")
         session.commit()
         report = judge_candidates(
             session,
-            run_id=handle.run_id,
+            run_id=str(run_id),
             sender=sender,
             candidates=queue,
             batch_size=args.judge_batch_size,
@@ -949,9 +943,9 @@ def _run_judge_cli(
             bypass_cache=getattr(args, "fresh", False),
         )
         if not args.dry_run:
-            finish_run(
+            close_run(
                 session,
-                str(handle.run_id),
+                run_id,
                 status="ok" if report.ok else "degraded",
                 layer_status={"L3-judge": report.as_dict()},
                 notes=f"{report.summary()} ({note})",
@@ -959,7 +953,7 @@ def _run_judge_cli(
             session.commit()
 
     if not args.json:
-        print(f"judge run {handle.run_id} ({note})")
+        print(f"judge run {run_id} ({note})")
         print(report.summary())
         for entry in report.per_batch:
             # Counters are absent on entries that never reached a verdict (a cap, a degradation),
@@ -1082,11 +1076,11 @@ def _run_writer_cli(
             queue = None
             note = "live provider call"
 
-        handle = start_run(session, trigger="manual", resume=False)
+        run_id = open_run(session, trigger="manual")
         session.commit()
         report = write_briefs(
             session,
-            run_id=handle.run_id,
+            run_id=str(run_id),
             sender=sender,
             candidates=queue,
             top_k=args.top_k,
@@ -1094,9 +1088,9 @@ def _run_writer_cli(
             bypass_cache=getattr(args, "fresh", False),
         )
         if not args.dry_run:
-            finish_run(
+            close_run(
                 session,
-                str(handle.run_id),
+                run_id,
                 status="ok" if report.ok else "degraded",
                 layer_status={"L3-writer": report.as_dict()},
                 notes=f"{report.summary()} ({note})",
@@ -1104,7 +1098,7 @@ def _run_writer_cli(
             session.commit()
 
     if not args.json:
-        print(f"writer run {handle.run_id} ({note})")
+        print(f"writer run {run_id} ({note})")
         print(report.summary())
         for entry in report.briefs:
             cites = entry["citations"]
@@ -1175,9 +1169,7 @@ def _run_l0_cli(
         clock_for=_clock_factory(fixtures_dir=fixtures_dir),
         max_items_for=_limits_factory(fixtures_dir=fixtures_dir),
         trigger="manual",
-        resume=not args.no_resume,
         source_ids=args.source or None,
-        max_sources=args.limit,
         dry_run=args.dry_run,
     )
     payload = {

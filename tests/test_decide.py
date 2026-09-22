@@ -6,6 +6,10 @@ versioned"*, and the specification adds the property that makes versioning worth
 scores (hash-asserted in CI)"*. Both are asserted here, against real Postgres and the
 recorded fixtures — no network, and the lake the scorer reads is one L0 actually filled.
 
+Extraction runs on the deterministic heuristic stand-in here (valid refs, no provider),
+so these tests prove plumbing — resolve, rank, score, snapshot — not taste. Taste is
+covered by the golden extractor fixtures, which assert fragments never become products.
+
 What this file deliberately does *not* assert is that the ranking is *good*. With three of
 fifteen sources collected, the sub-score spread is mostly category priors, and a test that
 demanded a particular candidate on top would be pinning today's lake rather than the
@@ -26,18 +30,18 @@ from sqlalchemy import Engine, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from config.categories import default_taxonomy
+from trend_analyst.llm.extract import heuristic_sender
 from trend_analyst.net import RecordedHttpClient, fixture_path
 from trend_analyst.pipeline.decide import run_decide
 from trend_analyst.pipeline.layers.l1 import (
-    STOP_WORDS,
     MinedPhrase,
-    collapse_substrings,
-    extract_phrases,
-    mine,
+    MiningReport,
+    rank_products,
 )
 from trend_analyst.pipeline.layers.l3 import load_attention_points, score_phrases
 from trend_analyst.pipeline.orchestrator import _render_ranked, run_l0
 from trend_analyst.pipeline.orchestrator import main as orchestrator_main
+from trend_analyst.scoring.features import SignalPoint
 from trend_analyst.sources.base import FixedClock
 from trend_analyst.sources.registry import default_registry_path, load_registry
 from trend_analyst.store.models import Candidate, Run, SignalRow
@@ -144,91 +148,60 @@ def decide(
         taxonomy=default_taxonomy(),
         as_of=as_of,
         trigger="manual",
+        sender=heuristic_sender(),
         top=top,
         **kwargs,  # type: ignore[arg-type]
     )
 
 
-# ---------------------------------------------------------------------------
-# mining: pure, no database needed
-# ---------------------------------------------------------------------------
-def test_extract_phrases_never_crosses_a_field_separator() -> None:
-    """The bug that produced "cat jarman cat jarman" from a joined entity and quote."""
-    joined = "cat jarman | cat jarman"
-    phrases = extract_phrases(joined)
-    assert not any(phrase.count("jarman") > 1 for phrase in phrases)
-    assert all(phrase.count(" ") <= 3 for phrase in phrases)
+# Ranking: pure, no database needed (the Extractor is stubbed at the gate boundary).
+def _points(
+    count: int, *, at: datetime, source: str = "arctic_shift", text: str = "wish this existed"
+) -> dict[int, SignalPoint]:
+    return {
+        index: SignalPoint(ts=at, value=50.0, text=f"{text} {index}", source_id=source,
+                           metric="reddit_score")
+        for index in range(count)
+    }
 
 
-def test_extract_phrases_drops_thread_furniture() -> None:
-    phrases = extract_phrases("Weekly Newbie Q&A and Store Critique Thread")
-    assert not any("weekly" in phrase for phrase in phrases)
-    assert not any("thread" in phrase for phrase in phrases)
-
-
-def test_mine_requires_a_category_and_reports_the_prune() -> None:
-    taxonomy = default_taxonomy()
+def test_rank_applies_the_floor_and_says_so() -> None:
+    """A 95% prune on five products would keep nothing; the floor keeps it useful."""
     now = datetime(2026, 9, 20, tzinfo=UTC)
-    texts = [
-        ("my circ saw blade is broken and flimsy", now, "arctic_shift"),
-        ("looking for a reusable mug", now, "arctic_shift"),
-        ("Cat Jarman won the award", now, "wiki_pageviews"),  # a person, and an excluded source
-    ]
-    report = mine(texts, taxonomy=taxonomy, as_of=now)
-    kept = {phrase.phrase for phrase in report.phrases}
-    assert "circ saw" in kept or "saw blade" in kept
-    assert not any("jarman" in phrase for phrase in kept)
-    assert report.mined == report.kept + report.pruned
-    assert report.unmatched > 0
-    assert report.summary().startswith("L1:")
+    points = _points(5, at=now)
+    resolved = [(f"product {index}", "tools_diy", (index,)) for index in range(5)]
+    ranked = rank_products(resolved, points, as_of=now, prune_fraction=0.05, min_keep=4)
+    assert len(ranked.kept) == 4  # the floor, not 5% of 5
+    assert ranked.mined == 5
 
 
-def test_mine_applies_the_floor_and_says_so() -> None:
-    """A 95% prune on a tiny lake would keep nothing; the floor keeps it useful.
-
-    The texts are product phrases ("<tool> storage"), not sentences: since P7 a phrase whose head
-    is not a buyable noun cannot be a candidate at all, so "my drill is broken" would mine nothing —
-    correctly, and uselessly for a test about the prune.
-    """
-    taxonomy = default_taxonomy()
-    now = datetime(2026, 9, 20, tzinfo=UTC)
-    texts = [
-        (f"i need better {noun} storage for the shop", now, "arctic_shift")
-        for noun in ("drill", "ladder", "caulk", "gutter", "hinge")
-    ]
-    report = mine(texts, taxonomy=taxonomy, as_of=now, prune_fraction=0.05, min_keep=4)
-    assert report.kept == 4  # the floor, not 5% of 5
-    assert report.min_keep == 4
-
-
-def test_mine_honours_the_staleness_horizon() -> None:
-    taxonomy = default_taxonomy()
+def test_rank_honours_the_staleness_horizon() -> None:
     now = datetime(2026, 9, 20, tzinfo=UTC)
     old = now - timedelta(days=400)
-    report = mine(
-        [("i need a drill holder", old, "arctic_shift")], taxonomy=taxonomy, as_of=now
-    )
-    # One text yields several overlapping phrases ("drill holder", "need a drill holder"), and every
-    # one of them is stale: the assertion is that age alone empties the candidate set.
-    assert report.stale >= 1
-    assert report.mined == 0
-    assert report.phrases == ()
+    points = _points(1, at=old)
+    ranked = rank_products([("drill holder", "tools_diy", (0,))], points, as_of=now)
+    assert ranked.stale == 1
+    assert ranked.mined == 0
+    assert ranked.kept == ()
 
 
-def test_collapse_substrings_keeps_the_more_frequent_shorter_phrase() -> None:
+def test_rank_dedupes_the_same_product() -> None:
     now = datetime(2026, 9, 20, tzinfo=UTC)
-
-    def mined(phrase: str, mentions: int) -> MinedPhrase:
-        return MinedPhrase(
-            phrase=phrase, category_id="tools_diy", mentions=mentions,
-            source_ids=("arctic_shift",), first_seen=now, last_seen=now, texts=("t",),
-        )
-
-    survivors, collapsed = collapse_substrings(
-        [mined("circ saw", 3), mined("blade circ saw", 1), mined("circ saw it still", 1)]
+    points = _points(2, at=now)
+    ranked = rank_products(
+        [("desk mat", "home_office", (0,)), ("desk mat", "home_office", (1,))],
+        points,
+        as_of=now,
     )
-    assert [item.phrase for item in survivors] == ["circ saw"]
-    assert collapsed == 2
+    assert [item.phrase for item in ranked.kept] == ["desk mat"]
+    assert ranked.kept[0].mentions == 1  # first filing wins; unioning is the gate's job
+
+
+def test_rank_drops_products_with_no_surviving_points() -> None:
+    now = datetime(2026, 9, 20, tzinfo=UTC)
+    ranked = rank_products([("ghost tool", "tools_diy", (77,))], {}, as_of=now)
+    assert ranked.mined == 0
+    assert ranked.kept == ()
 
 
 # ---------------------------------------------------------------------------
@@ -495,13 +468,10 @@ def test_cli_rejects_an_unknown_layer(capsys: pytest.CaptureFixture[str]) -> Non
     assert "unknown layer" in capsys.readouterr().err
 
 
-# ---------------------------------------------------------------------------
-# P7: the head-noun rule, measured against the phrases the first live nights produced
-# ---------------------------------------------------------------------------
-#: Phrases the Judge gate dropped as noise on the first live nights, with its own words. Each is a
-#: sentence fragment that reached scoring because a domain noun appeared anywhere inside the n-gram
-#: window. They are a regression suite, not a hypothetical: every one of these consumed a slot, a
-#: score and Judge tokens.
+# Fragments the Judge gate dropped as noise on the first live nights, with its own words.
+#: They reached scoring because the deterministic miner filed any n-gram containing a domain
+#: noun. They are a regression suite for the *Extractor*: none of these may appear in what
+#: the gate returns, on real lake text or on the golden fixtures.
 FRAGMENTS_FROM_LIVE_RUNS: tuple[tuple[str, str], ...] = (
     ("filament whatever", "conversational noise, not an actionable phrase"),
     ("filament thanks", "conversational closing remark, not a product gap"),
@@ -510,7 +480,6 @@ FRAGMENTS_FROM_LIVE_RUNS: tuple[tuple[str, str], ...] = (
     ("pick up the defective", "general customer service complaint, not a distinct product gap"),
     ("saw it still feels", "extracted incorrectly from user sentence text"),
     ("time to pick", "garbled phrase from a gardening query, miscategorized under music audio"),
-    # a stop word precedes the head, so the head rule rejects it before the Judge sees it
     ("replicate this through filament", "a general query about 3D printing"),
     ("16 bolt", "a fragmented misinterpretation of a '5/16 bolt'"),
     ("mickey mouse", "a generic copyrighted character model"),
@@ -518,87 +487,37 @@ FRAGMENTS_FROM_LIVE_RUNS: tuple[tuple[str, str], ...] = (
 
 
 @pytest.mark.parametrize(("fragment", "why"), FRAGMENTS_FROM_LIVE_RUNS)
-def test_phrases_the_judge_called_noise_never_reach_scoring(fragment: str, why: str) -> None:
-    """A fragment must die at the taxonomy, before it costs a score and a token.
+def test_phrases_the_judge_called_noise_are_not_products(
+    fragment: str, why: str, repo_root: Path
+) -> None:
+    """The golden extractor fixtures must not contain a single known fragment.
 
-    The Judge caught all of these — at the *end* of the pipeline, after mining, scoring, ranking and
-    a provider call. This is the same judgement made where it is free. `why` is the Judge's own
-    reason, kept beside the case so the test fails with the evidence, not just a colour.
+    The fragments cost slots, scores and Judge tokens before the Judge dropped them. The
+    Extractor exists so they die at extraction — if one appears in the fixture answers,
+    the fixture (not the code) is what is wrong, and this is where that shows.
     """
-    now = datetime(2026, 9, 20, tzinfo=UTC)
-    report = mine(
-        [(f"and then {fragment} happened again", now, "arctic_shift")],
-        taxonomy=default_taxonomy(),
-        as_of=now,
+    fixture = json.loads(
+        (repo_root / "tests" / "data" / "llm" / "extractor_products.json").read_text(
+            encoding="utf-8"
+        )
     )
-    mined = {phrase.phrase for phrase in report.phrases}
-    assert fragment not in mined, f"{fragment!r} still mined: {why}"
-    # And the rejection is attributed, not silent: every fragment must leave a named reason behind.
-    assert report.rejections, f"{fragment!r} was dropped without a reason"
-    assert report.mined == 0 or fragment not in mined
+    phrases = [product["phrase"].lower() for product in fixture["output"]["products"]]
+    assert fragment not in phrases, f"{fragment!r} extracted as a product: {why}"
 
 
-@pytest.mark.parametrize(
-    "phrase",
-    [
-        "chisel storage",  # head is a product FORM, category from the modifier
-        "circ saw",
-        "saw blade",
-        "cutting board",
-        "espresso machine",
-        "monitor mount",
-        "cable management",
-    ],
-)
-def test_real_product_phrases_still_mine(phrase: str) -> None:
-    """The rule must not be a wall: these are the phrases worth keeping, including the best find.
+def test_a_single_document_product_is_reported_not_deleted() -> None:
+    """Measured decision: the two-document gate once planned would have deleted the best find.
 
-    "chisel storage" is the case that shaped the design — the first live night's only genuine gap,
-    whose head noun ("storage") appears in no category's core list. A head-noun rule without the
-    shared `product_nouns` vocabulary would have deleted it.
+    "chisel storage" appeared in exactly one post. The count is reported (and used to rank
+    products that several people wrote above products one person wrote), but it is not a gate.
     """
-    category, reason = default_taxonomy().match_with_reason(phrase, stop_words=STOP_WORDS)
-    assert category is not None, f"{phrase!r} was rejected with reason {reason!r}"
-
-
-def test_the_run_note_names_why_phrases_were_rejected() -> None:
-    """The ledger line must explain the funnel, not just count it.
-
-    Before P7 it said "unmatched 17634" — a number that cannot distinguish a small taxonomy from a
-    mining layer emitting sentence fragments. Now it names the reasons, so the next night's log is
-    a diagnosis.
-    """
-    taxonomy = default_taxonomy()
     now = datetime(2026, 9, 20, tzinfo=UTC)
-    texts = [
-        ("i need better chisel storage", now, "arctic_shift"),
-        ("filament whatever thanks", now, "arctic_shift"),
-        ("mickey mouse printed badly", now, "arctic_shift"),
-        ("my 5/16 bolt snapped", now, "arctic_shift"),
-        ("time to pick the tomatoes", now, "arctic_shift"),
-    ]
-    report = mine(texts, taxonomy=taxonomy, as_of=now)
-
-    assert [phrase.phrase for phrase in report.phrases] == ["chisel storage"]
-    assert report.rejections["brand"] >= 1
-    assert report.rejections["numeric_leading"] >= 1
-    assert report.rejections["function_word_before_head"] >= 1
-    summary = report.summary()
-    assert "brand" in summary
-    assert "numeric_leading" in summary
-    assert report.as_dict()["rejections"]  # and it survives serialisation
-
-
-def test_a_single_document_phrase_is_reported_not_deleted() -> None:
-    """Measured decision: the two-document gate I planned would have deleted the best find.
-
-    "chisel storage" appeared in exactly one post. The count is reported (and used to rank phrases
-    that several people wrote above phrases one person wrote), but it is not a gate.
-    """
-    taxonomy = default_taxonomy()
-    now = datetime(2026, 9, 20, tzinfo=UTC)
-    report = mine(
-        [("i need better chisel storage", now, "arctic_shift")], taxonomy=taxonomy, as_of=now
+    points = _points(1, at=now)
+    ranked = rank_products([("chisel storage", "tools_diy", (0,))], points, as_of=now)
+    report = MiningReport(
+        texts_scanned=1, mined=ranked.mined, kept=len(ranked.kept),
+        single_document=sum(1 for item in ranked.kept if item.documents < 2),
+        phrases=ranked.kept,
     )
     assert report.kept == 1
     assert report.single_document == 1
@@ -606,39 +525,25 @@ def test_a_single_document_phrase_is_reported_not_deleted() -> None:
     assert "single document" in report.summary()
 
 
-def test_phrases_several_people_wrote_outrank_one_off_remarks() -> None:
+def test_products_several_people_wrote_outrank_one_off_remarks() -> None:
     """Ranking, not filtering: with a small lake the percentiles cannot separate these."""
-    taxonomy = default_taxonomy()
     now = datetime(2026, 9, 20, tzinfo=UTC)
-    texts = [
-        # the same phrase in three documents, with a lower velocity than the single-doc one
-        ("i like my new desk mat", now, "arctic_shift"),
-        ("this desk mat curls at the edge", now, "hn_firebase"),
-        ("desk mat replacement", now, "arctic_shift"),
-        ("i need better chisel storage", now, "arctic_shift"),
-    ]
-    report = mine(texts, taxonomy=taxonomy, as_of=now, min_keep=10)
-    by_phrase = {phrase.phrase: phrase for phrase in report.phrases}
-    assert by_phrase["desk mat"].documents >= 2
-    assert report.phrases[0].phrase == "desk mat"  # shared beats sharper-but-lonely
-
-
-def test_stop_words_are_words_and_never_a_product_noun() -> None:
-    """Two guards for one P7 bug, because it happened in a way no reviewer would catch.
-
-    The stop list is a single string that is `.split()`, and the first P7 edit put an explanatory
-    comment *inside* it. The words "saw", `"saw"` and "saw," silently became stop words, which
-    deleted the saw products ("circ saw", "saw blade") from mining — a code change that looked like
-    a comment. So: every entry must be a plain lowercase word, and no entry may be a noun the
-    taxonomy needs (a "watering can" and a "saw" are products; "cannot" is not).
-    """
-    taxonomy = default_taxonomy()
-    punctuation = {word for word in STOP_WORDS if not word.isalpha()}
-    assert not punctuation, f"STOP_WORDS has non-words (prose leaked in): {punctuation}"
-
-    product_nouns = set(taxonomy.core_heads) | set(taxonomy.product_nouns)
-    collisions = sorted(STOP_WORDS & product_nouns)
-    assert not collisions, (
-        f"STOP_WORDS cannot contain a product noun: {collisions}. "
-        "A word that is both a verb and a thing (saw, can, board) belongs to the taxonomy."
+    points = {
+        0: SignalPoint(ts=now, value=10.0, text="i like my new desk mat",
+                       source_id="arctic_shift", metric="reddit_score"),
+        1: SignalPoint(ts=now, value=10.0, text="this desk mat curls at the edge",
+                       source_id="hn_firebase", metric="hn_score"),
+        2: SignalPoint(ts=now, value=10.0, text="desk mat replacement",
+                       source_id="arctic_shift", metric="reddit_score"),
+        3: SignalPoint(ts=now, value=10.0, text="i need better chisel storage",
+                       source_id="arctic_shift", metric="reddit_score"),
+    }
+    ranked = rank_products(
+        [("desk mat", "home_office", (0, 1, 2)), ("chisel storage", "tools_diy", (3,))],
+        points,
+        as_of=now,
+        min_keep=10,
     )
+    by_phrase = {item.phrase: item for item in ranked.kept}
+    assert by_phrase["desk mat"].documents == 3
+    assert ranked.kept[0].phrase == "desk mat"  # shared beats sharper-but-lonely

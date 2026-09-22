@@ -19,12 +19,14 @@ from typing import Any
 from pydantic import BaseModel
 
 from trend_analyst.llm.gateway import ProviderSpec, Sender
-from trend_analyst.llm.schemas import JudgeBatch, JudgeVerdict, WriterBrief
+from trend_analyst.llm.schemas import ExtractorOutput, JudgeBatch, JudgeVerdict, WriterBrief
 
 __all__ = ["ReplayMissError", "load_fixture", "replay_sender", "schema_for_fixture"]
 
 #: A fixture is a batch if its payload holds verdicts; otherwise it is one gate output.
 _BATCH_KEY = "verdicts"
+#: A fixture is an extraction if its payload holds products.
+_PRODUCTS_KEY = "products"
 
 
 class ReplayMissError(RuntimeError):
@@ -51,6 +53,8 @@ def schema_for_fixture(fixture: dict[str, Any], *, gate: str | None = None) -> t
     output = fixture.get("output") or {}
     if isinstance(output, dict) and _BATCH_KEY in output:
         return JudgeBatch
+    if isinstance(output, dict) and _PRODUCTS_KEY in output:
+        return ExtractorOutput
     if gate == "judge" or "decision" in output:
         return JudgeVerdict
     return WriterBrief
@@ -60,6 +64,10 @@ def _recorded_phrase(value: BaseModel) -> str:
     """The candidate a recording is about, whichever gate produced it."""
     if isinstance(value, JudgeBatch):
         return str(value.verdicts[0].phrase) if value.verdicts else ""
+    if isinstance(value, ExtractorOutput):
+        # An extraction is about a chunk, not a candidate: prompt matching for extractor
+        # fixtures is done by the caller, not by a phrase needle.
+        return ""
     return str(getattr(value, "phrase", ""))
 
 

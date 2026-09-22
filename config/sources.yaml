@@ -27,7 +27,7 @@
 #               when the source is large and public);
 #     daily   = sized to what one nightly pass actually needs, deliberately far below
 #               any provider ceiling — a budget is a leash we choose, not a quota we
-#               discovered. It is also the number the health CLI reports burn against.
+#               discovered. It is also the number the run report totals burn against.
 #   The per-entry comments record which of the two applies.
 #
 # SECRETS: none. Tier-A sources are `enabled: false` until their credential exists in
@@ -91,8 +91,10 @@ sources:
     domains: [wikimedia.org]
 
   # Appendix A #5 "Long-tail intent expansion", weekly, 1-2 s throttle.
+  # Google only: every documented Amazon completion endpoint 404s or answers empty
+  # lists without a real session context (probed September 2026).
   suggest_autocomplete:
-    role: Long-tail intent expansion (Google + Amazon)
+    role: Long-tail intent expansion (Google Suggest; Amazon needs a real session)
     module: trend_analyst.sources.tier_s.suggest
     tier: S
     layers: [L0]
@@ -100,7 +102,7 @@ sources:
     budget_per_day: 500
     rps: 0.5               # Appendix A: "1-2 s throttle"
     enabled: true
-    domains: [suggestqueries.google.com, completion.amazon.com]
+    domains: [suggestqueries.google.com]
 
   # Appendix A #6 "Micro-SaaS gaps (installs vs rating)", 1 req/s, weekly.
   wordpress_org:
@@ -165,6 +167,8 @@ sources:
     domains: [api.openalex.org, export.arxiv.org]
 
   # Appendix A #11 "News-cycle validation", nightly.
+  # GDELT answers 429 past one request per 5 seconds; the registry paces it at
+  # 0.2 rps (Appendix A said 1 rps — the endpoint overrules the appendix).
   gdelt_doc:
     role: News-cycle validation
     module: trend_analyst.sources.tier_s.gdelt
@@ -172,7 +176,7 @@ sources:
     layers: [L0]
     schedule: nightly
     budget_per_day: 500
-    rps: 1
+    rps: 0.2                # the endpoint demands 5 s gaps; Appendix A said 1 rps
     enabled: true
     domains: [api.gdeltproject.org]
 
@@ -284,6 +288,8 @@ sources:
     domains: [google.serper.dev]
 
   # Appendix A Tier A #5 "Launch velocity", instant OAuth app.
+  # Plugin written and unit-tested, but the GraphQL endpoint answers empty 400s
+  # (September 2026) — stays disabled until one live recording validates it.
   producthunt_graphql:
     role: Launch velocity
     module: trend_analyst.sources.tier_a.producthunt
@@ -292,7 +298,7 @@ sources:
     schedule: on_demand
     budget_per_day: 200
     rps: 0.5
-    enabled: false         # needs tier_a.producthunt_token
+    enabled: false         # needs tier_a.producthunt_client_id + secret, plus a live API
     domains: [api.producthunt.com]
 
   # Appendix A Tier A #6 "Mass-market trending items", account + key upload.
@@ -318,5 +324,5 @@ sources:
     schedule: on_demand
     budget_per_day: 5
     rps: 0.5
-    enabled: false         # needs tier_a.searchapi_key
+    enabled: true          # key present; L2 enriches the Judge's top-K through it
     domains: [www.searchapi.io]

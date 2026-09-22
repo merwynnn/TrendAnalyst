@@ -156,6 +156,8 @@ class TierASection(BaseModel):
     bestbuy_api_key: SecretStr = SecretStr("")
     serper_api_key: SecretStr = SecretStr("")
     producthunt_token: SecretStr = SecretStr("")
+    producthunt_client_id: SecretStr = SecretStr("")
+    producthunt_client_secret: SecretStr = SecretStr("")
     walmart_client_id: SecretStr = SecretStr("")
     walmart_client_secret: SecretStr = SecretStr("")
     searchapi_key: SecretStr = SecretStr("")

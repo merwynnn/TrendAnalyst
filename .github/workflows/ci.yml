@@ -98,7 +98,7 @@ jobs:
       - name: Judge gate — offline replay of a recorded provider answer
         run: uv run python -m trend_analyst.pipeline.orchestrator --judge-replay tests/data/llm/judge_verdict.json --fresh
 
-      - name: Nightly run — every layer, then a balanced ledger
+      - name: Nightly run — every layer, single-shot
         run: uv run python -m scripts.nightly --offline --dry-run
 
       - name: Golden eval cases

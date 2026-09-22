@@ -25,9 +25,6 @@ dependencies = [
     "tzdata==2026.4",
 ]
 
-[project.scripts]
-ta-health = "trend_analyst.health:main"
-
 [dependency-groups]
 dev = [
     "mypy==2.3.1",
@@ -87,11 +84,7 @@ ignore = [
 "scripts/**" = ["T201"]
 # The eval runner is an operator CLI too: stdout is its report.
 "evals/**" = ["T201"]
-"src/trend_analyst/monitor/health.py" = ["T201"]
-"src/trend_analyst/monitor/alerts.py" = ["T201"]
 "src/trend_analyst/pipeline/orchestrator.py" = ["T201"]
-# The viewer builder is a CLI too: it writes a file and reports where it went.
-"src/trend_analyst/viewer/build.py" = ["T201"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["trend_analyst", "config"]

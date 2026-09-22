@@ -2,19 +2,19 @@
 
 The registry is the source of truth for every registry-owned column: tier, layers,
 schedule, budgets, rps, cache TTL, enabled and the egress allowlist. This module copies it
-into the `sources` table so the pipeline, the health CLI and plain SQL all see the same
+into the `sources` table so the pipeline and plain SQL all see the same
 configuration without parsing YAML.
 
 Two rules make it safe to run at any time:
 
-* **The watermark is never written.** It is runtime state owned by the pipeline (spec
-  §5.1), not configuration — a sync must not be able to make a source re-fetch or skip
+* **The cursor is never written.** It is runtime state owned by the pipeline, not
+  configuration — a sync must not be able to make a source re-fetch or skip
   work, so the update statements never mention those columns.
 * **Nothing is deleted.** A source that disappears from the registry is disabled in place,
-  because `signals`, `raw_items` and `quota_ledger` rows still reference its id, and
+  because `signals` and `raw_items` rows still reference its id, and
   history outlives configuration.
 
-The orchestrator calls this before a run, because a watermark lives on the source's row.
+The orchestrator calls this before a run, because a cursor lives on the source's row.
 """
 
 from __future__ import annotations

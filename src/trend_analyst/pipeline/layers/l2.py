@@ -8,9 +8,9 @@ safe to run nightly:
   score, cut to ``top_k``. The Judge's `enrich` list (its own words: "ebay sold listings") is passed
   to the plugin as the phrase to look up, so the scarcest budget follows a decision rather than a
   guess.
-* **The leash is the ledger.** Every request goes through the source's `SourceBudget`, and every
-  spend is written to `quota_ledger` under the (run, source, operation) compare-and-swap key — so a
-  resumed night cannot pay twice for the same enrichment.
+* **The leash is the budget.** Every request goes through the source's `SourceBudget`,
+  which caps the run at `budget_per_day` requests. Single-shot: one pass per candidate,
+  so there is nothing to double-spend.
 * **No credential is a degradation, not a zero.** A Tier-A plugin without keys raises, and the layer
   records "skipped: no credential" with the reason. It never reports zero listings, because absence
   of data and absence of demand are different facts.
@@ -30,7 +30,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from trend_analyst.pipeline.orchestrator import _store_raw, _store_signals
-from trend_analyst.pipeline.state import record_spend, spent_today
 from trend_analyst.sources.base import (
     FetchContext,
     RawBatch,
@@ -163,11 +162,10 @@ def enrich_candidates(
         if budget is None:
             report.skipped_sources[source_id] = "no budget configured: the leash is required"
             continue
-        already_spent = spent_today(session, source_id, now=now)
-        if already_spent >= budget.budget_per_day:
+        if budget.spent_today >= budget.budget_per_day:
             report.skipped_sources[source_id] = (
                 f"daily budget exhausted "
-                f"({already_spent}/{budget.budget_per_day})"
+                f"({budget.spent_today}/{budget.budget_per_day})"
             )
             continue
 
@@ -262,16 +260,6 @@ def _enrich_one(
     if context_factory is None or client_for is None or clock is None:
         outcome.status = "skipped"
         outcome.reason = "no transport configured for L2"
-        return outcome
-
-    operation = f"l2:{source_id}:{phrase[:80]}"
-    # Compare-and-swap first: a resumed night re-running this candidate must not pay twice, and the
-    # ledger row is the record of having paid at all.
-    if not dry_run and not record_spend(
-        session, source_id=source_id, run_id=run_id, operation=operation, amount=1
-    ):
-        outcome.status = "skipped"
-        outcome.reason = "already enriched for this run (ledger compare-and-swap)"
         return outcome
 
     context = context_factory(

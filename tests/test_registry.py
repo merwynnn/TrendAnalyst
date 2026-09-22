@@ -120,12 +120,15 @@ def test_repository_registry_is_the_appendix_a_catalog(repo_root: Path) -> None:
 
     # Tier S runs in L0 and is enabled; Tier A enriches in L2 and ships disabled until
     # its credential exists (brief §6: the build never blocks on an approval).
+    # SearchAPI is the exception that proves the rule: key present, plugin implemented
+    # and live-verified, L2 driver wired — so it is enabled, and the gate asserts every
+    # enabled Tier-A source actually loads (an enabled stub would fail that check).
     assert all(source.tier == "S" for source in registry.for_layer("L0"))
     assert len(registry.for_layer("L0")) == 15
     assert all(source.layers == ("L2",) for source in registry.by_tier("A"))
     assert all(source.schedule == "on_demand" for source in registry.by_tier("A"))
     assert all(source.enabled for source in registry.by_tier("S"))
-    assert all(not source.enabled for source in registry.by_tier("A"))
+    assert {source.id for source in registry.by_tier("A") if source.enabled} == {"searchapi"}
     assert all(source.domains for source in registry.sources)
 
     # Appendix A order is preserved, first and last.
@@ -456,7 +459,8 @@ def test_cli_registry_prints_in_execution_order(
     out = capsys.readouterr().out
     assert out.index("hn_firebase") < out.index("wiki_pageviews") < out.index("ebay_browse")
     assert "22 sources (15 Tier S, 7 Tier A)" in out
-    assert "15 enabled, 7 disabled" in out
+    # SearchAPI is the one enabled Tier-A source (key present, plugin live-verified).
+    assert "16 enabled, 6 disabled" in out
 
 
 def test_cli_registry_json(repo_root: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -9,7 +9,6 @@ be replaced by a real recording.
 The properties that matter:
 
 * only `kept` candidates are enriched, and only the top-K of them;
-* the ledger's compare-and-swap means a re-run cannot pay twice for the same phrase;
 * a missing credential is a **skipped** enrichment with a reason, never "zero listings";
 * an exhausted budget stops the source without touching the other one;
 * a parse that finds no listings is `empty`, which is different from `0`.
@@ -25,7 +24,6 @@ from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from trend_analyst.pipeline.layers.l2 import L2Report, enrich_candidates
-from trend_analyst.pipeline.state import record_spend
 from trend_analyst.sources.base import (
     FetchContext,
     HttpResponse,
@@ -33,9 +31,12 @@ from trend_analyst.sources.base import (
     Signal,
     SourceBudget,
     SourcePlugin,
+    SourceSkippedError,
 )
 from trend_analyst.sources.tier_a.ebay import EbayBrowsePlugin, MissingCredentialError
-from trend_analyst.store.models import Candidate, QuotaLedger, RawItem, Run, Score, SignalRow
+from trend_analyst.sources.tier_a.producthunt import ProductHuntPlugin
+from trend_analyst.sources.tier_a.searchapi import SearchApiPlugin
+from trend_analyst.store.models import Candidate, RawItem, Run, Score, SignalRow
 
 pytestmark = pytest.mark.db
 
@@ -105,6 +106,25 @@ EBAY_JSON = """
 }
 """
 TOKEN_JSON = '{"access_token": "app-token-for-tests", "expires_in": 7200}'
+
+#: Hand-written Product Hunt response shape, labelled as such: the GraphQL endpoint
+#: answers empty 400s from here (September 2026), so no recording exists. The shape
+#: follows the public v2 schema (posts -> edges -> node); when a live recording lands,
+#: this constant goes away. What it proves is parsing, grounding and budget behaviour —
+#: not that Product Hunt serves these launches.
+PH_TOKEN_URL = "https://api.producthunt.com/v2/oauth/token"
+PH_GRAPHQL_URL = "https://api.producthunt.com/v2/api/graphql"
+PH_LAUNCHES_JSON = """
+{
+  "data": {"posts": {"edges": [
+    {"node": {"id": "1", "name": "DeskPad Pro", "tagline": "A mat that charges",
+     "votesCount": 512, "createdAt": "2026-09-20T08:00:00Z", "slug": "deskpad-pro"}},
+    {"node": {"id": "2", "name": "Nameless", "tagline": "",
+     "votesCount": 3, "createdAt": "2026-09-19T08:00:00Z", "slug": ""}},
+    {"node": {"name": "", "votesCount": 9}}
+  ]}}
+}
+"""
 
 
 def seed_candidates(session: Session, *, status: str = "kept", count: int = 3) -> None:
@@ -239,6 +259,192 @@ def test_the_plugin_fetches_with_credentials() -> None:
 
 
 # ---------------------------------------------------------------------------
+# the Product Hunt plugin (unvalidated live: GraphQL answers empty 400s from here)
+# ---------------------------------------------------------------------------
+def test_ph_plugin_reports_votes_per_launch() -> None:
+    plugin = ProductHuntPlugin()
+    batch = RawBatch.from_parts(
+        source_id="producthunt_graphql",
+        cursor="2026-09-21",
+        parts=[PH_LAUNCHES_JSON],
+        status_codes=(200,),
+        fetched_at=NOW,
+        request_count=2,
+    )
+    signals = plugin.parse(batch)
+    assert len(signals) == 2
+    assert signals[0].entity == "DeskPad Pro"
+    assert signals[0].value == 512.0
+    assert signals[0].metric == "ph_votes"
+    assert signals[0].url == "https://www.producthunt.com/posts/deskpad-pro"
+    assert signals[0].quote == "A mat that charges"
+    assert signals[0].metadata["slug"] == "deskpad-pro"
+    assert signals[1].entity == "Nameless"
+    assert signals[1].url is None, "no slug, no URL — and the signal still says so"
+
+
+def test_ph_plugin_refuses_to_fetch_without_credentials() -> None:
+    plugin = ProductHuntPlugin()
+    context = FetchContext(
+        run_id="r",
+        source_id="producthunt_graphql",
+        client=StubClient({}),
+        budget=budget_for("producthunt_graphql"),
+        clock=FixedClock(),
+        cursor="circ saw",
+    )
+    with pytest.raises(MissingCredentialError):
+        plugin.fetch(context)
+
+
+def test_ph_plugin_mints_a_token_then_queries() -> None:
+    class Secrets:
+        producthunt_client_id = "id-for-tests"
+        producthunt_client_secret = "secret-for-tests"
+
+    class Settings:
+        tier_a = Secrets()
+
+    client = StubClient({
+        PH_TOKEN_URL: (200, TOKEN_JSON),
+        PH_GRAPHQL_URL: (200, PH_LAUNCHES_JSON),
+    })
+    plugin = ProductHuntPlugin(settings=Settings())
+    context = FetchContext(
+        run_id="r",
+        source_id="producthunt_graphql",
+        client=client,
+        budget=budget_for("producthunt_graphql"),
+        clock=FixedClock(),
+        cursor="circ saw",
+    )
+    batch = plugin.fetch(context)
+    assert batch.request_count == 2, "the token call plus the launches query"
+    assert client.calls[0] == PH_TOKEN_URL, "token first, cached for the run"
+    again = plugin.fetch(
+        FetchContext(
+            run_id="r", source_id="producthunt_graphql", client=client,
+            budget=budget_for("producthunt_graphql"), clock=FixedClock(), cursor="circ saw",
+        )
+    )
+    assert again.request_count == 1, "a cached token costs no second dance"
+    assert len(plugin.parse(batch)) == 2
+
+
+# ---------------------------------------------------------------------------
+# the SearchAPI plugin (hand-written shapes from a real probe; recording would
+# commit the key, which travels in the URL — see the plugin docstring)
+# ---------------------------------------------------------------------------
+SEARCHAPI_JSON = """
+{
+  "inline_shopping": [
+    {"title": "Mind Reader Anti-Fatigue Mat", "price": "$39.86", "extracted_price": 39.86,
+     "seller": "Home Depot", "rating": 4.6, "reviews": 49},
+    {"title": "Genuine Mats Standing Desk Mat", "price": "$41.00", "extracted_price": 41.0,
+     "seller": "Amazon.com", "rating": 0, "reviews": 0},
+    {"title": "Priceless Mat", "price": "free", "extracted_price": null, "seller": "X"}
+  ],
+  "related_searches": [{"query": "Best standing desk mat"}]
+}
+"""
+
+
+def test_searchapi_reports_the_shelf_and_the_price_spread() -> None:
+    plugin = SearchApiPlugin()
+    batch = RawBatch.from_parts(
+        source_id="searchapi",
+        cursor="standing desk mat",
+        parts=[SEARCHAPI_JSON],
+        status_codes=(200,),
+        fetched_at=NOW,
+        request_count=1,
+    )
+    signals = plugin.parse(batch)
+    assert len(signals) == 1
+    signal = signals[0]
+    assert signal.entity == "standing desk mat"
+    assert signal.metric == "search_shopping"
+    assert signal.value == 3.0, "three listings competed"
+    assert signal.metadata["price_min"] == "39.86"
+    assert signal.metadata["price_median"] == "40.43"
+    assert signal.metadata["price_max"] == "41.00"
+    assert signal.metadata["priced_listings"] == "2"
+    assert signal.metadata["avg_rating"] == "4.60"
+    assert signal.metadata["sellers"] == "3"
+    assert signal.url, "a reader must be able to check the shelf"
+    assert "udm=28" in signal.url
+
+
+def test_searchapi_empty_shelf_is_no_signal_not_a_zero() -> None:
+    plugin = SearchApiPlugin()
+    assert plugin.parse(RawBatch.from_parts(
+        source_id="searchapi", cursor="nobody sells this",
+        parts=['{"inline_shopping": []}'], fetched_at=NOW)) == []
+    assert plugin.parse(RawBatch.from_parts(
+        source_id="searchapi", cursor="no cursor",
+        parts=['{"inline_shopping": [{"title": "T"}]}'], fetched_at=NOW)) == []
+
+
+def test_searchapi_refuses_to_fetch_without_a_key() -> None:
+    plugin = SearchApiPlugin()
+    context = FetchContext(
+        run_id="r",
+        source_id="searchapi",
+        client=StubClient({}),
+        budget=budget_for("searchapi"),
+        clock=FixedClock(),
+        cursor="standing desk mat",
+    )
+    with pytest.raises(MissingCredentialError):
+        plugin.fetch(context)
+
+
+def test_searchapi_fetches_one_request_per_phrase() -> None:
+    class Secrets:
+        searchapi_key = "key-for-tests"
+
+    class Settings:
+        tier_a = Secrets()
+
+    search_url = "https://www.searchapi.io/api/v1/search"
+    client = StubClient({search_url: (200, SEARCHAPI_JSON)})
+    plugin = SearchApiPlugin(settings=Settings())
+    context = FetchContext(
+        run_id="r",
+        source_id="searchapi",
+        client=client,
+        budget=budget_for("searchapi"),
+        clock=FixedClock(),
+        cursor="standing desk mat",
+    )
+    batch = plugin.fetch(context)
+    assert batch.cursor == "standing desk mat"
+    assert batch.request_count == 1, "the five-a-day budget means one call per phrase"
+    assert client.calls == [search_url], "one search request, nothing else"
+    assert len(plugin.parse(batch)) == 1
+
+
+def test_searchapi_needs_a_phrase_in_the_cursor() -> None:
+    class Secrets:
+        searchapi_key = "key-for-tests"
+
+    class Settings:
+        tier_a = Secrets()
+
+    plugin = SearchApiPlugin(settings=Settings())
+    context = FetchContext(
+        run_id="r",
+        source_id="searchapi",
+        client=StubClient({}),
+        budget=budget_for("searchapi"),
+        clock=FixedClock(),
+        cursor="",
+    )
+    with pytest.raises(SourceSkippedError, match="no enrichment phrase"):
+        plugin.fetch(context)
+
+
+# ---------------------------------------------------------------------------
 # the layer
 # ---------------------------------------------------------------------------
 def test_only_kept_candidates_are_enriched(sessions: sessionmaker[Session]) -> None:
@@ -276,7 +482,9 @@ def test_the_layer_enriches_the_top_k_only(sessions: sessionmaker[Session]) -> N
         assert session.execute(select(RawItem)).scalars().all()
 
 
-def test_a_resumed_run_does_not_pay_twice(sessions: sessionmaker[Session]) -> None:
+def test_a_second_pass_stores_no_duplicates(sessions: sessionmaker[Session]) -> None:
+    """Single-shot: calling twice re-fetches, but the signal unique key keeps the
+    lake at one row — a re-run is cheap, not free."""
     client = StubClient({EBAY_SEARCH: (200, EBAY_JSON)})
     with sessions() as session:
         seed_candidates(session, count=1)
@@ -293,11 +501,10 @@ def test_a_resumed_run_does_not_pay_twice(sessions: sessionmaker[Session]) -> No
         first = enrich_candidates(session, run_id=run.id, **kwargs)  # type: ignore[arg-type]
         assert first.enriched == 1
         second = enrich_candidates(session, run_id=run.id, **kwargs)  # type: ignore[arg-type]
-        assert second.enriched == 0
-        assert second.outcomes[0].reason.startswith("already enriched")
-        assert len(session.execute(select(SignalRow)).scalars().all()) == 1
-        ledger = session.execute(select(QuotaLedger)).scalars().all()
-        assert len(ledger) == 1, "one spend row per (run, source, phrase)"
+        assert second.enriched == 1, "the pass runs again — nothing is skipped as done"
+        assert len(session.execute(select(SignalRow)).scalars().all()) == 1, (
+            "but the lake holds no duplicate"
+        )
 
 
 def test_a_missing_credential_is_a_skip_with_a_reason(sessions: sessionmaker[Session]) -> None:
@@ -336,27 +543,15 @@ def test_an_exhausted_budget_skips_the_source_and_names_it(
     with sessions() as session:
         seed_candidates(session, count=1)
         run = session.execute(select(Run)).scalars().first()
-        report = enrich_candidates(
-            session,
-            run_id=run.id,
-            plugins={"ebay_browse": _StubPlugin()},
-            top_k=1,
-            budgets={"ebay_browse": budget_for(cap=1)},
-            client_for=lambda _source: client,
-            clock=FixedClock(),
-            context_factory=context_factory(client, FixedClock()),
-        )
-        del report
-        # Spend the cap, then run again: the source must be skipped, not silently under-collect.
-        record_spend(
-            session, source_id="ebay_browse", run_id=run.id, operation="manual", amount=1
-        )
+        spent = budget_for(cap=1)
+        spent.charge(1)
+        assert spent.spent_today == 1
         second = enrich_candidates(
             session,
             run_id=run.id,
             plugins={"ebay_browse": _StubPlugin()},
             top_k=1,
-            budgets={"ebay_browse": budget_for(cap=1)},
+            budgets={"ebay_browse": spent},
             client_for=lambda _source: client,
             clock=FixedClock(),
             context_factory=context_factory(client, FixedClock()),
@@ -431,7 +626,6 @@ def test_dry_run_writes_nothing(sessions: sessionmaker[Session]) -> None:
         )
         assert report.signals_written == 0
         assert session.execute(select(SignalRow)).scalars().all() == []
-        assert session.execute(select(QuotaLedger)).scalars().all() == []
 
 
 def test_the_report_serializes(sessions: sessionmaker[Session]) -> None:

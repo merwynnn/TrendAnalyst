@@ -49,7 +49,7 @@ from trend_analyst.llm.schemas import (
     enforce_grounding,
     parse_gate_output,
 )
-from trend_analyst.store.models import LLMCache, QuotaLedger
+from trend_analyst.store.models import LLMCache
 
 pytestmark = pytest.mark.db
 
@@ -383,7 +383,7 @@ def test_dry_run_calls_nobody_and_writes_nothing(sessions: sessionmaker[Session]
         assert session.execute(select(LLMCache)).all() == []
 
 
-def test_accounting_lands_in_the_ledger_and_the_token_log(
+def test_accounting_lands_in_the_token_log(
     sessions: sessionmaker[Session],
 ) -> None:
     """Brief: *"token log shows spend per gate"* — this is the assertion behind that claim."""
@@ -400,11 +400,6 @@ def test_accounting_lands_in_the_ledger_and_the_token_log(
         spend = token_spend_by_gate(session)
         assert spend["judge"]["answers"] == 2
         assert spend["judge"]["total_tokens"] == (10 + 5) + (20 + 7)
-        ledger = session.execute(
-            select(QuotaLedger).where(QuotaLedger.source_id == "llm_judge")
-        ).scalars().all()
-        assert len(ledger) == 2  # one row per call, so resume cannot double-count
-        assert {row.operation.split(":")[1] for row in ledger} == {"judge"}
 
 
 def test_a_batch_of_candidates_shares_one_gate_call(sessions: sessionmaker[Session]) -> None:
@@ -426,15 +421,18 @@ def test_a_batch_of_candidates_shares_one_gate_call(sessions: sessionmaker[Sessi
 
 
 def test_default_chain_matches_the_specification() -> None:
-    """The spec's provider order, plus a second Gemini model (documented in the source).
+    """The spec's provider order, spread over Gemini's per-model quotas (documented in source).
 
-    The extra entry is a deviation with live evidence behind it: Gemini returned HTTP 503
+    The extra entries are a deviation with live evidence behind it: Gemini returned HTTP 503
     "experiencing high demand" for the drill's ~450-token prompt while small prompts succeeded,
-    and with Groq unkeyed and Cerebras answering 402, one model per provider meant a gate outage.
-    The distinct-provider order is still exactly Gemini -> Groq -> Cerebras -> Ollama.
+    and the 2026-09-21 model probe proved the 3.x family are distinct rate-limit buckets (200
+    for 3.5/3.6, 503-overload for 3.7/3.8 — real ids, not wrong names). The distinct-provider
+    order is still exactly Gemini -> Groq -> Cerebras -> Ollama.
     """
-    names = [provider.name for provider in default_chain()]
-    assert names == ["gemini", "gemini", "gemini", "groq", "cerebras", "ollama"]
+    chain = default_chain()
+    names = [provider.name for provider in chain]
+    assert names == ["gemini"] * 6 + ["groq", "cerebras", "ollama"]
+    assert len({provider.model for provider in chain if provider.name == "gemini"}) == 6
     seen: list[str] = []
     for name in names:
         if name not in seen:

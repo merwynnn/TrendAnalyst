@@ -1,0 +1,86 @@
+{
+  "items": 8,
+  "max_items": 8,
+  "note": "Recorded from the live API by scripts/record_fixtures.py. Replayed by tests; never fetched by them. Header values are limited to content-type and retry-after.",
+  "passes": [
+    {
+      "cursor_in": null,
+      "cursor_out": "2026-09-21",
+      "items": 8,
+      "not_modified": false,
+      "pass": 1,
+      "requests": 8,
+      "signals": 80
+    },
+    {
+      "cursor_in": "2026-09-21",
+      "cursor_out": "2026-09-21",
+      "items": 8,
+      "not_modified": false,
+      "pass": 2,
+      "requests": 8,
+      "signals": 80
+    }
+  ],
+  "recorded_at": "2026-09-21T21:40:29+00:00",
+  "responses": {
+    "https://suggestqueries.google.com/complete/search?client=firefox&q=circular+saw": {
+      "body": "[\"circular saw\",[\"circular saw\",\"circular saw jig\",\"circular saw guide\",\"circular saw blade\",\"circular saw guide rail\",\"circular saw dewalt\",\"circular saw milwaukee\",\"circular saw edge guide\",\"circular saw bosch\",\"circular sawmill\"],[],{\"google:suggestsubtypes\":[[512],[512],[512],[512],[512],[512],[512],[512],[512],[512]]}]",
+      "headers": {
+        "content-type": "text/javascript; charset=ISO-8859-1"
+      },
+      "status": 200
+    },
+    "https://suggestqueries.google.com/complete/search?client=firefox&q=coffee+grinder": {
+      "body": "[\"coffee grinder\",[\"coffee grinder\",\"coffee grinder machine\",\"coffee grinder manual\",\"coffee grinder studio pro\",\"coffee grinder dance\",\"coffee grinders quintet\",\"coffee grinder comandante\",\"coffee grinder breakdance\",\"coffee grinder for espresso\",\"coffee grinder canadian tire\"],[],{\"google:suggestsubtypes\":[[512],[512],[512],[512],[512],[512],[512],[512],[512],[512]]}]",
+      "headers": {
+        "content-type": "text/javascript; charset=UTF-8"
+      },
+      "status": 200
+    },
+    "https://suggestqueries.google.com/complete/search?client=firefox&q=cordless+drill": {
+      "body": "[\"cordless drill\",[\"cordless drill\",\"cordless drill 20v\",\"cordless drill/driver\",\"cordless drill canadian tire\",\"cordless drill machine\",\"cordless drill set\",\"cordless drill with battery and charger\",\"cordless drill driver\",\"cordless drills on sale\",\"cordless drill bunnings\"],[],{\"google:suggestsubtypes\":[[512],[512],[512],[512],[22,30],[22,30],[22,30],[22,30],[22,30],[22,30]]}]",
+      "headers": {
+        "content-type": "text/javascript; charset=UTF-8"
+      },
+      "status": 200
+    },
+    "https://suggestqueries.google.com/complete/search?client=firefox&q=dog+crate": {
+      "body": "[\"dog crate\",[\"dog crate\",\"dog crate furniture\",\"dog crate cover\",\"dog crate car\",\"dog crate training\",\"dog crate sizes\",\"dog crate large\",\"dog crates near me\",\"dog crate kmart\",\"dog crate mat\"],[],{\"google:suggestsubtypes\":[[512],[512],[512],[512],[512],[22,30],[22,30],[22,30],[22,30],[22,30]]}]",
+      "headers": {
+        "content-type": "text/javascript; charset=ISO-8859-1"
+      },
+      "status": 200
+    },
+    "https://suggestqueries.google.com/complete/search?client=firefox&q=garden+hose": {
+      "body": "[\"garden hose\",[\"garden hose\",\"garden hose tuyau d arrosage\",\"garden hose traduction\",\"garden hose 17.5 m\",\"garden hose reel\",\"garden hose holder\",\"garden hose quick connect\",\"garden hose nozzle\",\"garden hose splitter\",\"garden hose fittings\"],[],{\"google:suggestsubtypes\":[[512],[512],[512],[512],[512],[512],[512],[512],[512],[512]]}]",
+      "headers": {
+        "content-type": "text/javascript; charset=ISO-8859-1"
+      },
+      "status": 200
+    },
+    "https://suggestqueries.google.com/complete/search?client=firefox&q=standing+desk": {
+      "body": "[\"standing desk\",[\"standing desk\",\"standing desk ikea\",\"standing desk design\",\"standing desk converter\",\"standing desk reddit\",\"standing desk diy\",\"standing desk cable management\",\"standing desk maroc\",\"standing desk frame\",\"standing desk amazon\"],[],{\"google:suggestsubtypes\":[[512],[512],[512],[512],[512],[512],[512],[512],[512],[512]]}]",
+      "headers": {
+        "content-type": "text/javascript; charset=ISO-8859-1"
+      },
+      "status": 200
+    },
+    "https://suggestqueries.google.com/complete/search?client=firefox&q=usb+hub": {
+      "body": "[\"usb hub\",[\"usb hub\",\"usb hub aliment\u00e9\",\"usb hub 3.0\",\"usb hub action\",\"usb hub fnac\",\"usb hub c est quoi\",\"usb hub type c\",\"usb hub tunisie\",\"usb hub for pc\",\"usb hub prix tunisie\"],[],{\"google:suggestsubtypes\":[[512],[512],[512],[512],[512],[512],[512],[512],[512],[512]]}]",
+      "headers": {
+        "content-type": "text/javascript; charset=ISO-8859-1"
+      },
+      "status": 200
+    },
+    "https://suggestqueries.google.com/complete/search?client=firefox&q=yoga+mat": {
+      "body": "[\"yoga mat\",[\"yoga matin\",\"yoga mat\",\"yoga maternelle\",\"yoga matin 10 min\",\"yoga matinal\",\"yoga maths\",\"yoga matters\",\"yoga mat\u00e9riel\",\"yoga matin 5 min\",\"yoga matin debutant\"],[],{\"google:suggestsubtypes\":[[512],[512,433,131],[512],[512],[512],[512],[512],[512],[512],[512]]}]",
+      "headers": {
+        "content-type": "text/javascript; charset=ISO-8859-1"
+      },
+      "status": 200
+    }
+  },
+  "signals_parsed": 80,
+  "source_id": "suggest_autocomplete"
+}
