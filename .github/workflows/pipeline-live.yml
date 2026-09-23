@@ -62,6 +62,20 @@ jobs:
       - name: Install (system interpreter, no downloads)
         run: uv sync --frozen
 
+      - name: Required secrets present
+        # An unset secret reaches the job as an empty string, which settings read as
+        # "not configured" — failing here names the missing secret instead of letting
+        # alembic die later with a traceback about provisioning scripts.
+        run: |
+          missing=""
+          [ -n "${{ secrets.NEON_DSN }}" ] || missing="$missing NEON_DSN"
+          [ -n "${{ secrets.GEMINI_API_KEY }}" ] || missing="$missing GEMINI_API_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secrets:$missing. Add them under Settings -> Secrets and variables -> Actions, then re-run."
+            exit 1
+          fi
+          echo "required secrets present"
+
       - name: Schema at head, zero drift
         run: |
           uv run alembic upgrade head
