@@ -39,9 +39,10 @@ permissions:
 
 jobs:
   live:
-    # Secrets live in the `base` environment (not at repo level) — without this
-    # line the job cannot see them and they arrive as empty strings.
-    environment: base
+    # Secrets live in the `Base` environment (not at repo level) — without this
+    # line the job cannot see them and they arrive as empty strings. The name is
+    # case-sensitive.
+    environment: Base
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
