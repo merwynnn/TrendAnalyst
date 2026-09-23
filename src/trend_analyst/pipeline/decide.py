@@ -173,6 +173,7 @@ def run_decide(
     dry_run: bool = False,
     top: int = 10,
     progress: Callable[[str], None] | None = None,
+    max_workers: int = 1,
 ) -> DecideReport:
     """Extract products from the lake window, score what survives, append the snapshots.
 
@@ -188,6 +189,8 @@ def run_decide(
             so a reader can see the prune was a decision, not an accident.
         dry_run: do everything and write nothing — including the candidates, so a dry run
             leaves the database exactly as it found it.
+        max_workers: parallel extractor calls (1 is sequential). Needs no extra setup:
+            worker sessions come from `sessions`.
     """
     taxonomy = taxonomy or default_taxonomy()
 
@@ -200,18 +203,28 @@ def run_decide(
         points = load_attention_points(
             session, as_of=as_of, window_days=window_days, source_ids=source_ids
         )
-        minable = [
-            (point.text, point.ts, point.source_id)
-            for point in points
-            if point.source_id not in excluded_sources
-        ]
-        chunks, index = build_chunks(
-            [(text, ts, source_id) for text, ts, source_id in minable],
-            chunk_size=chunk_size,
-        )
-        points_by_id = {global_id: points[position] for global_id, position in index.items()}
+        # Identical (source, text, timestamp) rows are the same utterance stored twice
+        # (one signal per metric): extracting both would pay twice for one text. Genuine
+        # reposts differ in timestamp and survive.
+        seen_texts: set[tuple[str, str, datetime]] = set()
+        unique: list[tuple[int, str, datetime, str]] = []
+        for position, point in enumerate(points):
+            if point.source_id in excluded_sources:
+                continue
+            key = (point.source_id, " ".join(point.text.split()), point.ts)
+            if key in seen_texts:
+                continue
+            seen_texts.add(key)
+            unique.append((position, point.text, point.ts, point.source_id))
+        minable = [(text, ts, source_id) for _, text, ts, source_id in unique]
+        chunks, index = build_chunks(minable, chunk_size=chunk_size)
+        points_by_id = {
+            global_id: points[unique[unique_position][0]]
+            for global_id, unique_position in index.items()
+        }
         mining = MiningReport(
-            texts_scanned=len(minable),
+            texts_scanned=len(points),
+            duplicate_texts=len(points) - len(unique),
             chunks=len(chunks),
             prune_fraction=prune_fraction,
             min_keep=min_keep,
@@ -226,6 +239,7 @@ def run_decide(
             progress(f"L1 decide: {len(points)} lake points -> {len(chunks)} chunk(s), {kind}")
         scoring, mining_note, status = _extract_and_rank(
             session,
+            sessions,
             points=points,
             points_by_id=points_by_id,
             chunks=chunks,
@@ -245,6 +259,7 @@ def run_decide(
             bypass_cache=bypass_cache,
             dry_run=dry_run,
             progress=progress,
+            max_workers=max_workers,
         )
         if progress is not None:
             progress(f"L1/L3 decide: scored {scoring.scored} candidate(s), status {status}")
@@ -328,6 +343,7 @@ def run_decide(
 
 def _extract_and_rank(
     session: Session,
+    sessions: sessionmaker[Session],
     *,
     points: Sequence[SignalPoint],
     points_by_id: dict[int, SignalPoint],
@@ -347,7 +363,8 @@ def _extract_and_rank(
     extractor_tokens_spent: int,
     bypass_cache: bool,
     dry_run: bool,
-    progress: Callable[[str], None] | None = None,
+    progress: Callable[[str], None] | None,
+    max_workers: int,
 ) -> tuple[L3Report, str, str]:
     """Run the Extractor gate, rank what it found, score the survivors.
 
@@ -374,7 +391,8 @@ def _extract_and_rank(
         dry_run=dry_run and not heuristic,
         bypass_cache=bypass_cache,
         write_cache=not heuristic and not dry_run,
-        progress=progress,
+        max_workers=max_workers,
+        session_factory=sessions,
     )
     mining.chunks = extraction.chunks
     mining.attempted = extraction.attempted

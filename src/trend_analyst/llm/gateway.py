@@ -37,11 +37,13 @@ from trend_analyst.llm.schemas import (
 
 __all__ = [
     "DEFAULT_CHAIN",
+    "EXTRACTOR_CHAIN",
     "GateBudget",
     "GatewayOutcome",
     "ProviderSpec",
     "call_gate",
     "default_chain",
+    "default_extractor_chain",
 ]
 
 #: Spec §6.3's chain, in order, with the model ids each provider's API actually accepts.
@@ -121,6 +123,28 @@ class ProviderSpec:
 def default_chain() -> tuple[ProviderSpec, ...]:
     """Gemini Flash -> Groq -> Cerebras -> local Ollama."""
     return tuple(ProviderSpec(name=name, model=model) for name, model in DEFAULT_CHAIN)
+
+
+#: The Extractor's chain: cheapest and fastest first. Extraction is a simple,
+#: high-volume task — it wants the model with the highest rate limits and lowest
+#: latency, not the strongest reasoner — with the full family behind it for failover.
+#: Same per-model quota buckets as the default chain, just interrogated lite-first.
+EXTRACTOR_CHAIN: Final[tuple[tuple[str, str], ...]] = (
+    ("gemini", "gemini-3.5-flash-lite"),
+    ("gemini", "gemini-3.5-flash"),
+    ("gemini", "gemini-3.6-flash"),
+    ("gemini", "gemini-3.7-flash"),
+    ("gemini", "gemini-3.8-flash"),
+    ("gemini", "gemini-flash-latest"),
+    ("groq", "openai/gpt-oss-120b"),
+    ("cerebras", "gpt-oss-120b"),
+    ("ollama", "llama3.2"),
+)
+
+
+def default_extractor_chain() -> tuple[ProviderSpec, ...]:
+    """Lite-first provider order for the high-volume Extractor gate."""
+    return tuple(ProviderSpec(name=name, model=model) for name, model in EXTRACTOR_CHAIN)
 
 
 @dataclass(frozen=True, slots=True)

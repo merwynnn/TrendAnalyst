@@ -505,6 +505,35 @@ def test_phrases_the_judge_called_noise_are_not_products(
     assert fragment not in phrases, f"{fragment!r} extracted as a product: {why}"
 
 
+def test_identical_texts_are_deduped_before_extraction(
+    sessions: sessionmaker[Session],
+) -> None:
+    """One signal per metric means the same utterance stored twice: extracting both
+    would pay twice for one text, so the duplicate never reaches a chunk.
+
+    Scoped to a probe source: the shared test lake holds whatever other tests left
+    behind, and this test measures only its own rows.
+    """
+    now = datetime(2026, 9, 20, tzinfo=UTC)
+    with sessions() as session:
+        session.add_all([
+            SignalRow(source_id="dedupe_probe", entity="wish this existed", metric="m1",
+                      value=1.0, ts=now),
+            SignalRow(source_id="dedupe_probe", entity="wish this existed", metric="m2",
+                      value=2.0, ts=now),
+            SignalRow(source_id="dedupe_probe", entity="something else entirely", metric="m1",
+                      value=1.0, ts=now),
+        ])
+        session.commit()
+        report = run_decide(
+            sessions=sessions, taxonomy=default_taxonomy(), as_of=now, trigger="manual",
+            source_ids=["dedupe_probe"], sender=heuristic_sender(), dry_run=True,
+        )
+    assert report.mining.texts_scanned == 3
+    assert report.mining.duplicate_texts == 1
+    assert report.mining.chunks == 1
+
+
 def test_a_single_document_product_is_reported_not_deleted() -> None:
     """Measured decision: the two-document gate once planned would have deleted the best find.
 

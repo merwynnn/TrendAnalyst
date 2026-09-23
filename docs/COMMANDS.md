@@ -32,9 +32,10 @@ Single-shot: every run opens a fresh run row and runs every requested source. A 
 means re-running from scratch — dedup and idempotent inserts keep it cheap.
 
 Extraction (L1) is a gate: `--fixtures` runs it on the deterministic heuristic stand-in
-(no network, no spend); `--extract` runs it live (needs a provider key, ~40 calls over
-the per-model chain); neither means it is skipped with a reason and there is nothing
-to score. Read-only commands (`--briefs`, `--history*`) never collect or extract.
+(no network, no spend); `--extract` runs it live (needs a provider key, ~45 calls over
+the per-model chain, `--extract-workers 4` in parallel); neither means it is skipped
+with a reason and there is nothing to score. Read-only commands (`--briefs`,
+`--history*`) never collect or extract.
 
 ### Snapshots and history
 

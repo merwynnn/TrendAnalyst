@@ -1,4 +1,4 @@
-"""Extractor gate tests: schema, chunking, code-enforced grounding, budgets.
+"""Extractor gate tests: schema, chunking, code-enforced grounding, budgets, speed.
 
 The gate's contract, in test order:
 
@@ -8,7 +8,9 @@ The gate's contract, in test order:
   product left with no refs is dropped whole (the extraction `unknown_phrase` rule);
 * cross-chunk products merge their refs instead of splitting the evidence;
 * caps are terminal (partial, named) and a failed chunk is a gap, not a crash;
-* the cache makes replay deterministic: the provider is called once per chunk, ever.
+* the cache makes replay deterministic: the provider is called once per chunk, ever;
+* speed: big chunks, truncated texts, lite-first chain, parallel workers that merge
+  in submission order — a parallel run reports identically to a sequential one.
 """
 
 from __future__ import annotations
@@ -23,15 +25,23 @@ from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from trend_analyst.llm.extract import (
+    MAX_PRODUCTS_PER_CHUNK,
+    TEXT_TRUNCATE_CHARS,
     ResolvedProduct,
     build_chunks,
     chunk_payload,
     chunk_prompt,
     extract_products,
+    extractor_instructions,
     resolve_output,
     union_products,
 )
-from trend_analyst.llm.gateway import GateBudget, ProviderSpec, default_chain
+from trend_analyst.llm.gateway import (
+    GateBudget,
+    ProviderSpec,
+    default_chain,
+    default_extractor_chain,
+)
 from trend_analyst.llm.replay import load_fixture, schema_for_fixture
 from trend_analyst.llm.schemas import ExtractorOutput, GateName, parse_gate_output
 from trend_analyst.store.models import LLMCache
@@ -285,3 +295,68 @@ def test_default_chain_spreads_over_per_model_quotas() -> None:
     assert len(set(providers)) >= 3
     gemini_models = [spec.model for spec in default_chain() if spec.name == "gemini"]
     assert len(set(gemini_models)) >= 5, "one id, one quota bucket: the spread IS the capacity"
+
+
+def test_extractor_chain_leads_lite() -> None:
+    """Extraction is high-volume and simple: cheapest and fastest first, strength behind."""
+    models = [spec.model for spec in default_extractor_chain()]
+    assert models[0] == "gemini-3.5-flash-lite"
+    gemini_models = {spec.model for spec in default_chain() if spec.name == "gemini"}
+    assert set(models) >= gemini_models, "same quota buckets, interrogated lite-first"
+
+
+def test_prompt_bounds_products_and_truncates_texts() -> None:
+    long_text = "word " * 400
+    (chunk,), _ = build_chunks([(long_text, NOW, "arctic_shift")], chunk_size=30)
+    prompt = chunk_prompt(chunk)
+    assert f"at most {MAX_PRODUCTS_PER_CHUNK} products" in prompt
+    body = prompt.split("[0]", 1)[1]
+    assert len(body) < len(long_text), "the model sees the head, not the whole post"
+    assert len(body) <= TEXT_TRUNCATE_CHARS + 100  # id, source and date ride along
+    assert extractor_instructions(max_products=5).count("at most 5 products") == 1
+
+
+def test_payload_truncates_exactly_like_the_prompt() -> None:
+    """The cache key must describe what the model saw, or caching lies."""
+    long_text = "word " * 400
+    (chunk,), _ = build_chunks([(long_text, NOW, "arctic_shift")], chunk_size=30)
+    stored = chunk_payload(chunk)["texts"][0]["text"]
+    assert stored == " ".join(long_text.split())[:TEXT_TRUNCATE_CHARS]
+    prompt = chunk_prompt(chunk)
+    assert stored in prompt
+
+
+@pytest.mark.db
+def test_parallel_matches_sequential(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Workers change latency, never the outcome: merge order is submission order.
+
+    Cache counters are excluded from the comparison on purpose: both runs share the
+    test's transaction, so the second run legitimately sees the first run's flushed
+    cache rows. What must match is everything the merge decides.
+    """
+    chunks, _ = build_chunks(texts(65), chunk_size=30)
+    with sessions() as session:
+        sequential = extract_products(session, chunks, sender=fixed_sender(answer_json()))
+    with sessions() as session:
+        parallel = extract_products(
+            session, chunks, sender=fixed_sender(answer_json()),
+            max_workers=4, session_factory=sessions,
+        )
+    assert parallel.status == sequential.status == "ok"
+    assert [item.phrase for item in parallel.products] == [
+        item.phrase for item in sequential.products
+    ]
+    assert parallel.calls == sequential.calls
+    assert parallel.products_raw == sequential.products_raw
+    assert parallel.unknown_refs == sequential.unknown_refs
+
+
+@pytest.mark.db
+def test_parallel_needs_a_session_factory(
+    sessions: sessionmaker[Session],
+) -> None:
+    chunks, _ = build_chunks(texts(3), chunk_size=30)
+    with sessions() as session, pytest.raises(ValueError, match="session_factory"):
+        extract_products(session, chunks, sender=fixed_sender(answer_json()), max_workers=4)

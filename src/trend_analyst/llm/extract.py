@@ -23,6 +23,7 @@ Three rules keep the gate honest, and each mirrors a Judge-gate lesson:
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -39,7 +40,7 @@ from trend_analyst.llm.gateway import (
     ProviderSpec,
     Sender,
     call_gate,
-    default_chain,
+    default_extractor_chain,
 )
 from trend_analyst.llm.schemas import ExtractorOutput
 
@@ -47,6 +48,8 @@ __all__ = [
     "DEFAULT_CHUNK_SIZE",
     "EXTRACTOR_CATEGORIES",
     "EXTRACTOR_INSTRUCTIONS",
+    "MAX_PRODUCTS_PER_CHUNK",
+    "TEXT_TRUNCATE_CHARS",
     "ChunkText",
     "ExtractReport",
     "ResolvedProduct",
@@ -54,6 +57,7 @@ __all__ = [
     "chunk_payload",
     "chunk_prompt",
     "extract_products",
+    "extractor_instructions",
     "heuristic_sender",
     "resolve_output",
     "union_products",
@@ -74,15 +78,24 @@ EXTRACTOR_CATEGORIES: Final[tuple[str, ...]] = (
     "music_audio",
 )
 
-#: Texts per provider call. Thirty texts at ~150 tokens each is ~4.5k tokens in — small
-#: enough that per-model free-tier rate limits carry a night of ~40 chunks, large enough
-#: that one call costs less than the Judge's batches it replaces the fragments of.
-DEFAULT_CHUNK_SIZE: Final = 30
+#: Texts per provider call. A hundred texts at ~150 tokens each is ~15k tokens in —
+#: one slow round trip instead of three, which is what makes a grown lake affordable.
+#: The per-call token count grows, but the night's total barely moves (each text is
+#: still read once), while wall-clock time falls with the call count.
+DEFAULT_CHUNK_SIZE: Final = 100
 
 #: Products per chunk, bounded so one chatty chunk cannot eat the night's budget.
-MAX_PRODUCTS_PER_CHUNK: Final = 20
+#: Enforced by the prompt (the model sees the bound), not by truncating its answer.
+MAX_PRODUCTS_PER_CHUNK: Final = 40
 
-EXTRACTOR_INSTRUCTIONS: Final = """You are the Extractor gate of a product-gap discovery pipeline.
+#: Characters of each text the model sees. Full texts travel with the resolved refs
+#: downstream — this only trims what the prompt carries. Product talk declares itself
+#: early (titles, opening complaints); the tail is rarely where the product is.
+TEXT_TRUNCATE_CHARS: Final = 500
+
+#: Template, not the prompt: {max_products} is filled per call, so the doubled
+#: braces are literal JSON braces, not format fields.
+_EXTRACTOR_TEMPLATE: Final = """You are the Extractor gate of a product-gap discovery pipeline.
 Below are numbered texts people wrote (post titles and quotes, with their source and date).
 Return the distinct physical products, digital goods or micro-SaaS ideas they talk about wanting,
 complaining about, comparing or asking for.
@@ -97,10 +110,22 @@ Skip, without mentioning: sentence fragments ("filament thanks", "anybody saw");
 with no problem, wish or comparison ("excellent filament"); thread furniture ("weekly thread",
 "price check"); proper nouns that are not products ("Cat Jarman"); non-English texts unless
 they clearly name a product in English words. Overlapping descriptions of the same thing are
-ONE product with all of their doc_ids.
+ONE product with all of their doc_ids. Return at most {max_products} products: the most
+clearly product-shaped ones first.
 
 Answer with JSON only:
-{"products": [{"phrase": str, "category": str, "doc_ids": [int], "reason": str}]}"""
+{{"products": [{{"phrase": str, "category": str, "doc_ids": [int], "reason": str}}]}}"""
+
+#: Backwards-compatible alias: the instructions with the default product bound. Tests
+#: and prompts that do not care about the bound keep reading this name.
+EXTRACTOR_INSTRUCTIONS: Final = _EXTRACTOR_TEMPLATE.format(
+    max_products=MAX_PRODUCTS_PER_CHUNK
+)
+
+
+def extractor_instructions(*, max_products: int = MAX_PRODUCTS_PER_CHUNK) -> str:
+    """The prompt instructions with an explicit product bound."""
+    return _EXTRACTOR_TEMPLATE.format(max_products=max_products)
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,12 +235,24 @@ def build_chunks(
     return chunks, index
 
 
-def chunk_prompt(chunk: Sequence[ChunkText]) -> str:
+def _shown_text(text: str) -> str:
+    """What the model sees of one text: whitespace-collapsed, truncated.
+
+    Truncation and the cache key agree by construction (both call this), so a cached
+    answer always matches the prompt it was computed from.
+    """
+    collapsed = " ".join(text.split())
+    return collapsed[:TEXT_TRUNCATE_CHARS]
+
+
+def chunk_prompt(
+    chunk: Sequence[ChunkText], *, max_products: int = MAX_PRODUCTS_PER_CHUNK
+) -> str:
     """The prompt for one chunk: instructions, then the numbered texts."""
-    lines = [EXTRACTOR_INSTRUCTIONS, ""]
+    lines = [extractor_instructions(max_products=max_products), ""]
     for item in chunk:
         stamp = item.ts.date().isoformat() if isinstance(item.ts, datetime) else str(item.ts)
-        lines.append(f"[{item.id}] ({item.source_id}, {stamp}) {item.text}")
+        lines.append(f"[{item.id}] ({item.source_id}, {stamp}) {_shown_text(item.text)}")
     return "\n".join(lines)
 
 
@@ -223,7 +260,8 @@ def chunk_payload(chunk: Sequence[ChunkText]) -> dict[str, Any]:
     """The cache-key material for one chunk: the texts, without prompt decoration.
 
     Two prompts that differ only in whitespace or wrapping share a cache entry, because
-    what matters is the work (these texts), not the envelope.
+    what matters is the work (these texts), not the envelope. Truncated exactly like
+    the prompt, so the key always describes what the model actually saw.
     """
     return {
         "texts": [
@@ -231,7 +269,7 @@ def chunk_payload(chunk: Sequence[ChunkText]) -> dict[str, Any]:
                 "id": item.id,
                 "source": item.source_id,
                 "ts": item.ts.isoformat() if isinstance(item.ts, datetime) else str(item.ts),
-                "text": " ".join(item.text.split()),
+                "text": _shown_text(item.text),
             }
             for item in chunk
         ]
@@ -374,6 +412,8 @@ def extract_products(
     write_cache: bool = True,
     run_gate: Callable[..., GatewayOutcome] | None = None,
     progress: Callable[[str], None] | None = None,
+    max_workers: int = 1,
+    session_factory: Callable[[], Session] | None = None,
 ) -> ExtractReport:
     """Extract products chunk by chunk, grounding every ref in code.
 
@@ -384,6 +424,13 @@ def extract_products(
         write_cache: skip cache writes (the heuristic stand-in always passes False: its
             answers must never be cached as model output).
         progress: called with one line per chunk (index, provider, cached/live, yield).
+        max_workers: parallel provider calls. 1 is strictly sequential; higher values
+            run chunks concurrently for latency (the workload is network-bound). Merge
+            order is always submission order, so parallel runs report identically to
+            sequential ones. Sessions are never shared: each worker opens its own via
+            `session_factory`, which is required when max_workers > 1. Caps are checked
+            before each dispatch, so in-flight calls can overshoot them by at most the
+            worker count — bounded and stated, not silent.
     """
     report = ExtractReport(chunks=len(chunks))
     if not chunks:
@@ -394,64 +441,33 @@ def extract_products(
         report.status = "dry-run"
         report.reason = "dry run: the provider was not called"
         return report
+    if max_workers > 1 and session_factory is None:
+        raise ValueError("parallel extraction needs a session_factory (sessions are per worker)")
 
     limits = budget or DEFAULT_BUDGETS["extractor"]
-    providers = tuple(chain) if chain is not None else default_chain()
+    providers = tuple(chain) if chain is not None else default_extractor_chain()
     gate = run_gate or call_gate
+    total = len(chunks)
     resolved_batches: list[list[ResolvedProduct]] = []
 
-    total = len(chunks)
-    for position, chunk in enumerate(chunks, start=1):
-        wall = _budget_wall(report, limits=limits, calls_spent=calls_spent,
-                            tokens_spent=tokens_spent)
-        if wall:
-            report.status = "partial"
-            report.reason = wall
-            break
-        report.attempted += 1
-        payload = chunk_payload(chunk)
-        outcome = gate(
-            session,
-            gate="extractor",
-            prompt=chunk_prompt(chunk),
-            schema=ExtractorOutput,
-            sender=sender,
-            chain=providers,
-            budget=limits,
-            payload=payload,
-            cached_calls_today=calls_spent + report.calls,
-            cached_tokens_today=tokens_spent + report.prompt_tokens + report.completion_tokens,
-            run_id=None,
-            now=now,
-            bypass_cache=bypass_cache,
-            write_cache=write_cache,
+    if max_workers > 1:
+        _extract_parallel(
+            report, chunks, resolved_batches,
+            gate=gate, session_factory=session_factory, sender=sender, providers=providers,
+            limits=limits, calls_spent=calls_spent, tokens_spent=tokens_spent, now=now,
+            bypass_cache=bypass_cache, write_cache=write_cache, progress=progress,
+            max_workers=max_workers,
         )
-        if outcome.capped:
-            report.status = "partial"
-            report.reason = outcome.reason
-            break
-        if not outcome.ok or not isinstance(outcome.value, ExtractorOutput):
-            report.failed_chunks += 1
-            continue
-        report.calls += 1
-        if outcome.cached:
-            report.cached += 1
-        report.prompt_tokens += outcome.prompt_tokens
-        report.completion_tokens += outcome.completion_tokens
-        report.products_raw += len(outcome.value.products)
-        valid = {item.id for item in chunk}
-        resolved, invented = resolve_output(outcome.value, valid_ids=valid)
-        report.unknown_refs += invented
-        if not resolved:
-            report.empty_chunks += 1
-        resolved_batches.append(resolved)
-        if progress is not None:
-            served = "cached" if outcome.cached else f"{outcome.provider}:{outcome.model}"
-            progress(
-                f"L1 extract [{position}/{total}] {served} "
-                f"({outcome.prompt_tokens + outcome.completion_tokens} tok) -> "
-                f"{len(resolved)} product(s), {invented} invented ref(s) dropped"
-            )
+    else:
+        for position, chunk in enumerate(chunks, start=1):
+            if _apply_chunk(
+                report, chunk, resolved_batches, position=position, total=total,
+                gate=gate, session=session, sender=sender, providers=providers,
+                limits=limits, calls_spent=calls_spent, tokens_spent=tokens_spent,
+                now=now, bypass_cache=bypass_cache, write_cache=write_cache,
+                progress=progress,
+            ) == "stop":
+                break
 
     report.products = tuple(union_products(resolved_batches))
     if report.status == "ok" and report.attempted < len(chunks):
@@ -464,3 +480,204 @@ def extract_products(
         report.status = "degraded"
         report.reason = f"{report.failed_chunks} chunk(s) failed and none produced products"
     return report
+
+
+def _apply_chunk(
+    report: ExtractReport,
+    chunk: Sequence[ChunkText],
+    resolved_batches: list[list[ResolvedProduct]],
+    *,
+    position: int,
+    total: int,
+    gate: Callable[..., GatewayOutcome],
+    session: Session,
+    sender: Sender,
+    providers: tuple[ProviderSpec, ...],
+    limits: GateBudget,
+    calls_spent: int,
+    tokens_spent: int,
+    now: datetime | None,
+    bypass_cache: bool,
+    write_cache: bool,
+    progress: Callable[[str], None] | None,
+) -> str:
+    """Run one chunk through the wall, the gate and grounding. Returns stop/continue."""
+    wall = _budget_wall(report, limits=limits, calls_spent=calls_spent,
+                        tokens_spent=tokens_spent)
+    if wall:
+        report.status = "partial"
+        report.reason = wall
+        return "stop"
+    report.attempted += 1
+    outcome = gate(
+        session,
+        gate="extractor",
+        prompt=chunk_prompt(chunk),
+        schema=ExtractorOutput,
+        sender=sender,
+        chain=providers,
+        budget=limits,
+        payload=chunk_payload(chunk),
+        cached_calls_today=calls_spent + report.calls,
+        cached_tokens_today=tokens_spent + report.prompt_tokens + report.completion_tokens,
+        run_id=None,
+        now=now,
+        bypass_cache=bypass_cache,
+        write_cache=write_cache,
+    )
+    return _record_outcome(
+        report, chunk, resolved_batches, outcome,
+        position=position, total=total, progress=progress,
+    )
+
+
+def _record_outcome(
+    report: ExtractReport,
+    chunk: Sequence[ChunkText],
+    resolved_batches: list[list[ResolvedProduct]],
+    outcome: GatewayOutcome,
+    *,
+    position: int,
+    total: int,
+    progress: Callable[[str], None] | None,
+) -> str:
+    """Fold one chunk's outcome into the report. Returns stop/continue."""
+    if outcome.capped:
+        report.status = "partial"
+        report.reason = outcome.reason
+        return "stop"
+    if not outcome.ok or not isinstance(outcome.value, ExtractorOutput):
+        report.failed_chunks += 1
+        if progress is not None:
+            progress(f"L1 extract [{position}/{total}] failed: {outcome.reason[:120]}")
+        return "continue"
+    report.calls += 1
+    if outcome.cached:
+        report.cached += 1
+    report.prompt_tokens += outcome.prompt_tokens
+    report.completion_tokens += outcome.completion_tokens
+    report.products_raw += len(outcome.value.products)
+    valid = {item.id for item in chunk}
+    resolved, invented = resolve_output(outcome.value, valid_ids=valid)
+    report.unknown_refs += invented
+    if not resolved:
+        report.empty_chunks += 1
+    resolved_batches.append(resolved)
+    if progress is not None:
+        served = "cached" if outcome.cached else f"{outcome.provider}:{outcome.model}"
+        progress(
+            f"L1 extract [{position}/{total}] {served} "
+            f"({outcome.prompt_tokens + outcome.completion_tokens} tok) -> "
+            f"{len(resolved)} product(s), {invented} invented ref(s) dropped"
+        )
+    return "continue"
+
+
+def _extract_parallel(
+    report: ExtractReport,
+    chunks: Sequence[Sequence[ChunkText]],
+    resolved_batches: list[list[ResolvedProduct]],
+    *,
+    gate: Callable[..., GatewayOutcome],
+    session_factory: Callable[[], Session] | None,
+    sender: Sender,
+    providers: tuple[ProviderSpec, ...],
+    limits: GateBudget,
+    calls_spent: int,
+    tokens_spent: int,
+    now: datetime | None,
+    bypass_cache: bool,
+    write_cache: bool,
+    progress: Callable[[str], None] | None,
+    max_workers: int,
+) -> None:
+    """Run chunks concurrently, merging strictly in submission order.
+
+    Sessions are never shared: each worker opens its own session, commits its cache
+    writes, and closes it — a worker that dies mid-call rolls back and reports the
+    chunk failed. Caps are checked in the dispatch thread before each submit, so
+    in-flight calls can overshoot them by at most the worker count. Merge order is
+    submission order, so a parallel run reports identically to a sequential one.
+    """
+    assert session_factory is not None  # checked by the caller
+    total = len(chunks)
+    pending: list[tuple[int, concurrent.futures.Future[GatewayOutcome]]] = []
+    stopped = False
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for position, chunk in enumerate(chunks, start=1):
+            if stopped:
+                break
+            wall = _budget_wall(report, limits=limits, calls_spent=calls_spent,
+                                tokens_spent=tokens_spent)
+            if wall:
+                report.status = "partial"
+                report.reason = wall
+                stopped = True
+                break
+            report.attempted += 1
+            pending.append((position, pool.submit(
+                _extract_one,
+                gate=gate, session_factory=session_factory, chunk=chunk,
+                sender=sender, providers=providers, limits=limits,
+                calls_spent=calls_spent, tokens_spent=tokens_spent, now=now,
+                bypass_cache=bypass_cache, write_cache=write_cache,
+            )))
+        # Merge in submission order even though workers finish out of order.
+        for position, future in pending:
+            if stopped and report.status == "partial":
+                future.cancel()
+                continue
+            try:
+                outcome = future.result()
+            except Exception as exc:  # a dead worker is a failed chunk, never a crash
+                report.failed_chunks += 1
+                if progress is not None:
+                    progress(f"L1 extract [{position}/{total}] worker failed: {exc}"[:160])
+                continue
+            if _record_outcome(
+                report, chunks[position - 1], resolved_batches, outcome,
+                position=position, total=total, progress=progress,
+            ) == "stop":
+                stopped = True
+
+
+def _extract_one(
+    *,
+    gate: Callable[..., GatewayOutcome],
+    session_factory: Callable[[], Session],
+    chunk: Sequence[ChunkText],
+    sender: Sender,
+    providers: tuple[ProviderSpec, ...],
+    limits: GateBudget,
+    calls_spent: int,
+    tokens_spent: int,
+    now: datetime | None,
+    bypass_cache: bool,
+    write_cache: bool,
+) -> GatewayOutcome:
+    """One chunk on one worker session: call, commit the cache write, close."""
+    session = session_factory()
+    try:
+        outcome = gate(
+            session,
+            gate="extractor",
+            prompt=chunk_prompt(chunk),
+            schema=ExtractorOutput,
+            sender=sender,
+            chain=providers,
+            budget=limits,
+            payload=chunk_payload(chunk),
+            cached_calls_today=calls_spent,
+            cached_tokens_today=tokens_spent,
+            run_id=None,
+            now=now,
+            bypass_cache=bypass_cache,
+            write_cache=write_cache,
+        )
+        session.commit()
+        return outcome
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()

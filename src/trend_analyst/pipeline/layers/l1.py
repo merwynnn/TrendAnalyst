@@ -100,6 +100,7 @@ class MiningReport:
     """What L1 did, in numbers, so the prune and the drops are visible in the run note."""
 
     texts_scanned: int = 0
+    duplicate_texts: int = 0
     chunks: int = 0
     attempted: int = 0
     calls: int = 0
@@ -123,6 +124,7 @@ class MiningReport:
     def as_dict(self) -> dict[str, object]:
         return {
             "texts_scanned": self.texts_scanned,
+            "duplicate_texts": self.duplicate_texts,
             "chunks": self.chunks,
             "attempted": self.attempted,
             "calls": self.calls,
@@ -148,7 +150,8 @@ class MiningReport:
             else f"{self.chunks} chunks"
         )
         return (
-            f"L1: {self.texts_scanned} texts -> {coverage} "
+            f"L1: {self.texts_scanned} texts ({self.duplicate_texts} duplicates skipped) "
+            f"-> {coverage} "
             f"({self.calls} calls, {self.cached} cached, {self.failed_chunks} failed) -> "
             f"{self.mined} products ({self.unknown_refs} invented refs dropped, "
             f"stale {self.stale}), pruned {self.pruned}, "
