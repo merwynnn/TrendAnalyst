@@ -147,6 +147,16 @@ with `NIGHTLY: FAIL`, or any layer reads `failed`, jump to §6.
    no provider key, so it cannot spend money and cannot fail for reasons outside the repository. To
    run it by hand: **Actions → nightly → Run workflow**, and tick `dry_run` (the default).
 
+3. **The on-demand live run** — same pipeline, real sources, real gates, production database.
+   `.github/workflows/pipeline-live.yml` never runs on a schedule; trigger it by hand
+   (**Actions → pipeline-live → Run workflow**) whenever you want a night on demand.
+   First, add the secrets it reads (repo Settings → Secrets and variables → Actions):
+   `NEON_DSN` (the direct host, not `-pooler`), `GEMINI_API_KEY`, and optionally
+   `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `SEARCHAPI_KEY`, `PRODUCTHUNT_CLIENT_ID`,
+   `PRODUCTHUNT_CLIENT_SECRET`. The run defaults to `--dry-run` (full progress output,
+   no writes, no spend) — untick it for the real thing, and watch it stream per-source,
+   per-chunk, per-batch lines into the run log.
+
 **Cost at expected volume (one nightly run: 15 Tier-S sources, ≤60 judged candidates, ≤5 briefs).**
 
 | Provider | What it costs here | Free-tier limit | What would trigger a paid tier | Guard already in the code |

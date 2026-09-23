@@ -248,6 +248,7 @@ def write_briefs(
     dry_run: bool = False,
     bypass_cache: bool = False,
     gateway: Callable[..., GatewayOutcome] | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> WriterReport:
     """Write briefs for the top-K kept candidates, one provider call each.
 
@@ -272,7 +273,8 @@ def write_briefs(
         report.reason = "no kept candidate needs a brief in this run"
         return report
 
-    for candidate in queue:
+    total = len(queue)
+    for position, candidate in enumerate(queue, start=1):
         wall = _budget_wall(
             report, limits=limits, calls_spent=calls_spent, tokens_spent=tokens_spent
         )
@@ -281,6 +283,8 @@ def write_briefs(
             report.reason = wall
             break
 
+        if progress is not None:
+            progress(f"L3 writer [{position}/{total}] {candidate.phrase}: briefing")
         payload, allowed_urls = _payload_for(session, candidate)
         step = _write_one(
             session,
@@ -300,18 +304,11 @@ def write_briefs(
             dry_run=dry_run,
             bypass_cache=bypass_cache,
         )
-        if step.stop:
-            report.status = step.status
-            report.reason = step.reason
+        if _record_step(
+            report, step, position=position, total=total,
+            phrase=candidate.phrase, progress=progress,
+        ):
             break
-        if step.skipped:
-            report.skipped_existing += 1
-        elif step.written:
-            report.written += 1
-        if step.entry is not None:
-            report.briefs.append(step.entry)
-            if not step.entry["grounded"]:
-                report.ungrounded += 1
 
         if not dry_run:
             session.flush()
@@ -342,6 +339,44 @@ class _WriteStep:
     status: str = "ok"
     reason: str = ""
     entry: dict[str, Any] | None = None
+
+
+def _progress_line(position: int, total: int, phrase: str, step: _WriteStep) -> str:
+    """One progress line for a finished brief: what happened, and via which model."""
+    outcome = "skipped (exists)" if step.skipped else (
+        "written" if step.written else step.status
+    )
+    model = ""
+    if step.entry is not None and step.entry.get("model"):
+        model = f" via {step.entry['model']}"
+    return f"L3 writer [{position}/{total}] {phrase}: {outcome}{model}"
+
+
+def _record_step(
+    report: WriterReport,
+    step: _WriteStep,
+    *,
+    position: int,
+    total: int,
+    phrase: str,
+    progress: Callable[[str], None] | None,
+) -> bool:
+    """Fold one candidate's outcome into the report. Returns True when the run stops."""
+    if step.stop:
+        report.status = step.status
+        report.reason = step.reason
+        return True
+    if step.skipped:
+        report.skipped_existing += 1
+    elif step.written:
+        report.written += 1
+    if step.entry is not None:
+        report.briefs.append(step.entry)
+        if not step.entry["grounded"]:
+            report.ungrounded += 1
+    if progress is not None:
+        progress(_progress_line(position, total, phrase, step))
+    return False
 
 
 def _write_one(

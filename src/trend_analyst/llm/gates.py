@@ -593,6 +593,7 @@ def judge_candidates(
     limit: int = DEFAULT_BATCH_SIZE * 3,
     bypass_cache: bool = False,
     max_rounds: int = 2,
+    progress: Callable[[str], None] | None = None,
 ) -> JudgeReport:
     """Judge the candidates a decide run produced, and apply the verdicts.
 
@@ -639,8 +640,16 @@ def judge_candidates(
             break
 
         missing: list[JudgedCandidate] = []
-        for start_index in range(0, len(remaining), batch_size):
+        total_batches = (len(remaining) + batch_size - 1) // batch_size
+        for batch_index, start_index in enumerate(
+            range(0, len(remaining), batch_size), start=1
+        ):
             chunk = remaining[start_index : start_index + batch_size]
+            if progress is not None:
+                progress(
+                    f"L3 judge [round {round_index + 1}, batch {batch_index}/{total_batches}] "
+                    f"{len(chunk)} candidate(s)"
+                )
             step = _judge_one_batch(
                 session,
                 run_id=run_id,

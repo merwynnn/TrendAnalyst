@@ -17,7 +17,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -149,14 +150,27 @@ def run_nightly(
     judge_sender: Any = None,
     writer_sender: Any = None,
     run_ttl: bool = True,
+    progress: Callable[[str], None] | None = None,
 ) -> NightlyReport:
     """Run every layer once, single-shot.
 
     The gate senders are injected so the offline path can replay recorded answers (or the
     deterministic heuristic stand-in for extraction) and the tests can use stubs; in a
     live run the caller passes the real provider transport.
+
+    `progress`, when given, receives one line per unit of work (source, chunk, batch,
+    brief, enrichment) as it happens — the nightly CLI passes a timestamped printer.
     """
     report = NightlyReport(started_at=as_of, offline=offline, dry_run=dry_run)
+
+    def _say(message: str) -> None:
+        if progress is not None:
+            progress(message)
+
+    _say(
+        f"nightly run — {'OFFLINE' if offline else 'LIVE'}"
+        f"{' (dry run)' if dry_run else ''}: collecting, extracting, judging, writing"
+    )
     source_ids, offline_note = _resolve_offline_sources(
         registry=registry, offline=offline, fixtures_dir=fixtures_dir, source_ids=source_ids
     )
@@ -174,6 +188,7 @@ def run_nightly(
         trigger="nightly",
         source_ids=list(source_ids) if source_ids else None,
         dry_run=dry_run,
+        progress=progress,
     )
     report.l0_status = l0.status
     report.l0_items_new = l0.items_new
@@ -188,72 +203,29 @@ def run_nightly(
         sender=extractor_sender,
         dry_run=dry_run,
         top=top_k,
+        progress=progress,
     )
     report.decide_status = decide.status
     report.candidates_scored = decide.scoring.scored
 
     # --- L2: enrich the top-K the Judge kept (only with a Tier-A credential) -----------------
     _record_l2(report, _run_l2(sessions=sessions, registry=registry, settings=settings,
-                               offline=offline, dry_run=dry_run, top_k=top_k))
+                               offline=offline, dry_run=dry_run, top_k=top_k,
+                               progress=progress))
 
     # --- L3: judge, then write ----------------------------------------------
     with sessions() as session:
-        queue = list(pending_judgements(session, limit=judge_batch_size * 2))
-        run_id = open_run(session, trigger="nightly")
-        session.commit()
-        report.judge_status = "empty"
-        if queue and judge_sender is not None:
-            judged = judge_candidates(
-                session,
-                run_id=str(run_id),
-                sender=judge_sender,
-                candidates=queue,
-                batch_size=judge_batch_size,
-                dry_run=dry_run,
-                bypass_cache=offline,
-            )
-            report.judge_status = judged.status
-            report.judged = judged.judged
-            report.notes.append(judged.summary())
-        elif queue:
-            report.judge_status = "skipped"
-            report.notes.append("no gate transport available, so nothing was judged")
-
-        kept = list(
-            session.execute(
-                select(Candidate).where(Candidate.status == "kept").order_by(Candidate.id)
-            ).scalars().all()
+        _run_gates(
+            session,
+            report=report,
+            judge_sender=judge_sender,
+            writer_sender=writer_sender,
+            judge_batch_size=judge_batch_size,
+            top_k=top_k,
+            offline=offline,
+            dry_run=dry_run,
+            progress=progress,
         )
-        if dry_run:
-            # Close the run this stage opened: a dry run writes nothing, but a run row left
-            # open would read as a run that never finished.
-            close_run(
-                session,
-                run_id,
-                status="aborted",
-                notes="DRY RUN: the judge/writer stage wrote nothing",
-            )
-            session.commit()
-        else:
-            close_run(session, run_id, status="ok" if kept else "empty")
-            session.commit()
-        report.writer_status = "empty"
-        if kept and writer_sender is not None:
-            written = write_briefs(
-                session,
-                run_id=str(run_id),
-                sender=writer_sender,
-                candidates=kept[:top_k],
-                top_k=top_k,
-                dry_run=dry_run,
-                bypass_cache=offline,
-            )
-            report.writer_status = written.status
-            report.briefs_written = written.written
-            report.notes.append(written.summary())
-        elif kept:
-            report.writer_status = "skipped"
-            report.notes.append("no gate transport available, so no brief was written")
 
     # --- maintenance ----------------------------------------------------------
     with sessions() as session:
@@ -264,7 +236,86 @@ def run_nightly(
                 session.commit()
         else:
             report.ttl_summary = "skipped"
+    _say(f"TTL: {report.ttl_summary}")
+    _say(
+        f"nightly done — L0 {report.l0_status}, decide {report.decide_status} "
+        f"({report.candidates_scored} scored), L2 {report.l2_status}, "
+        f"judge {report.judge_status}, writer {report.writer_status}"
+    )
     return report
+
+
+def _run_gates(
+    session: Session,
+    *,
+    report: NightlyReport,
+    judge_sender: Any,
+    writer_sender: Any,
+    judge_batch_size: int,
+    top_k: int,
+    offline: bool,
+    dry_run: bool,
+    progress: Callable[[str], None] | None,
+) -> None:
+    """Judge the queue, then brief what was kept — one run row for both gates."""
+    queue = list(pending_judgements(session, limit=judge_batch_size * 2))
+    run_id = open_run(session, trigger="nightly")
+    session.commit()
+    report.judge_status = "empty"
+    if queue and judge_sender is not None:
+        judged = judge_candidates(
+            session,
+            run_id=str(run_id),
+            sender=judge_sender,
+            candidates=queue,
+            batch_size=judge_batch_size,
+            dry_run=dry_run,
+            bypass_cache=offline,
+            progress=progress,
+        )
+        report.judge_status = judged.status
+        report.judged = judged.judged
+        report.notes.append(judged.summary())
+    elif queue:
+        report.judge_status = "skipped"
+        report.notes.append("no gate transport available, so nothing was judged")
+
+    kept = list(
+        session.execute(
+            select(Candidate).where(Candidate.status == "kept").order_by(Candidate.id)
+        ).scalars().all()
+    )
+    if dry_run:
+        # Close the run this stage opened: a dry run writes nothing, but a run row left
+        # open would read as a run that never finished.
+        close_run(
+            session,
+            run_id,
+            status="aborted",
+            notes="DRY RUN: the judge/writer stage wrote nothing",
+        )
+        session.commit()
+    else:
+        close_run(session, run_id, status="ok" if kept else "empty")
+        session.commit()
+    report.writer_status = "empty"
+    if kept and writer_sender is not None:
+        written = write_briefs(
+            session,
+            run_id=str(run_id),
+            sender=writer_sender,
+            candidates=kept[:top_k],
+            top_k=top_k,
+            dry_run=dry_run,
+            bypass_cache=offline,
+            progress=progress,
+        )
+        report.writer_status = written.status
+        report.briefs_written = written.written
+        report.notes.append(written.summary())
+    elif kept:
+        report.writer_status = "skipped"
+        report.notes.append("no gate transport available, so no brief was written")
 
 
 def _record_l2(report: NightlyReport, l2: L2Report) -> None:
@@ -305,6 +356,7 @@ def _run_l2(
     offline: bool,
     dry_run: bool,
     top_k: int,
+    progress: Callable[[str], None] | None = None,
 ) -> Any:
     """Run L2 enrichment when a Tier-A source is both registered and credentialed.
 
@@ -349,6 +401,7 @@ def _run_l2(
             client_for=client_for,
             clock=SystemClock(),
             context_factory=FetchContext,
+            progress=progress,
         )
         for source_id, reason in skipped.items():
             report.skipped_sources[source_id] = reason
@@ -416,6 +469,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--no-ttl", action="store_true", help="skip the retention job")
     parser.add_argument("--config-dir", default=None)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--quiet", action="store_true",
+        help="only the final report, no per-unit progress lines",
+    )
     args = parser.parse_args(argv)
 
     config_dir = Path(args.config_dir) if args.config_dir else default_config_dir()
@@ -443,6 +500,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     sessions = create_session_factory(engine)
+    started = time.monotonic()
+
+    def _progress(message: str) -> None:
+        elapsed = time.monotonic() - started
+        print(f"[{elapsed:7.1f}s] {message}", flush=True)
+
     try:
         as_of = _resolve_as_of(sessions)
         report = run_nightly(
@@ -462,6 +525,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             judge_sender=judge_sender,
             writer_sender=writer_sender,
             run_ttl=not args.no_ttl,
+            progress=None if args.quiet else _progress,
         )
     finally:
         engine.dispose()

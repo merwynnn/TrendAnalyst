@@ -134,6 +134,7 @@ def enrich_candidates(
     client_for: Callable[[str], Any] | None = None,
     clock: Any = None,
     context_factory: Callable[..., FetchContext] | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> L2Report:
     """Enrich the top-K kept candidates from the enabled Tier-A sources.
 
@@ -153,6 +154,9 @@ def enrich_candidates(
         report.reason = "no kept candidate needs enrichment"
         return report
 
+    if progress is not None:
+        progress(f"L2 enrich: {len(queued)} kept candidate(s) queued for {list(source_ids)}")
+
     for source_id in source_ids:
         plugin = plugins.get(source_id)
         if plugin is None:
@@ -169,7 +173,7 @@ def enrich_candidates(
             )
             continue
 
-        for candidate in queued:
+        for position, candidate in enumerate(queued, start=1):
             phrase = _enrichment_query(session, candidate)
             if not phrase:
                 continue
@@ -188,6 +192,12 @@ def enrich_candidates(
                 context_factory=context_factory,
             )
             report.outcomes.append(outcome)
+            if progress is not None:
+                progress(
+                    f"L2 [{source_id}] [{position}/{len(queued)}] {phrase}: "
+                    f"{outcome.status} (items={outcome.items} signals={outcome.signals} "
+                    f"spend={outcome.quota_spent})"
+                )
             if outcome.status == "ok" and not dry_run:
                 session.flush()
     return report

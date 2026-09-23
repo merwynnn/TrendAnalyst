@@ -1,0 +1,81 @@
+name: pipeline-live
+
+# On-demand live run: the real sources, the real gates, the real database.
+# Trigger by hand: Actions -> pipeline-live -> Run workflow. Nothing runs on a
+# schedule here — every invocation is deliberate, because every invocation can
+# spend quota (LLM tokens, Tier-A calls) and writes to the production database.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   NEON_DSN             full SQLAlchemy DSN of the production database
+#                        (direct host, NOT the -pooler one: the pooler rejects
+#                        lock_timeout, which migrations set)
+#   GEMINI_API_KEY       primary LLM provider (Judge, Writer, Extractor)
+# Optional secrets (failover / enrichment stay skipped without them):
+#   GROQ_API_KEY, CEREBRAS_API_KEY, SEARCHAPI_KEY,
+#   PRODUCTHUNT_CLIENT_ID, PRODUCTHUNT_CLIENT_SECRET
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Walk the whole path but write nothing (and call no provider)"
+        type: boolean
+        default: true
+      top_k:
+        description: "Candidates the Writer briefs / L2 enriches"
+        type: number
+        default: 5
+      judge_batch_size:
+        description: "Candidates per Judge call"
+        type: number
+        default: 6
+      source:
+        description: "Limit L0 to one source id (empty = all enabled)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TA_ENV: prod
+      TA_DB__URL: ${{ secrets.NEON_DSN }}
+      TA_LLM__GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      TA_LLM__GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      TA_LLM__CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+      TA_TIER_A__SEARCHAPI_KEY: ${{ secrets.SEARCHAPI_KEY }}
+      TA_TIER_A__PRODUCTHUNT_CLIENT_ID: ${{ secrets.PRODUCTHUNT_CLIENT_ID }}
+      TA_TIER_A__PRODUCTHUNT_CLIENT_SECRET: ${{ secrets.PRODUCTHUNT_CLIENT_SECRET }}
+      UV_PYTHON_DOWNLOADS: never
+      UV_NO_MANAGED_PYTHON: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install (system interpreter, no downloads)
+        run: uv sync --frozen
+
+      - name: Schema at head, zero drift
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
+
+      - name: Live nightly (single-shot, full progress)
+        run: |
+          args="--top-k ${{ inputs.top_k }} --judge-batch-size ${{ inputs.judge_batch_size }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then args="$args --dry-run"; fi
+          if [ -n "${{ inputs.source }}" ]; then args="$args --source ${{ inputs.source }}"; fi
+          uv run python -m scripts.nightly $args --json | tee nightly-live.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-live-report
+          path: nightly-live.json

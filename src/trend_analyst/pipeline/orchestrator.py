@@ -429,6 +429,7 @@ def run_l0(
     trigger: str = "nightly",
     source_ids: Sequence[str] | None = None,
     dry_run: bool = False,
+    progress: Callable[[str], None] | None = None,
 ) -> RunReport:
     """Run L0 for every enabled L0 source (or the requested subset), in registry order.
 
@@ -458,10 +459,16 @@ def run_l0(
 
         budgets = _fresh_budgets(registry, source_ids=pending, make_clock=make_clock)
         outcomes: list[SourceOutcome] = []
+        total = len(pending)
 
-        for source_id in pending:
+        def _say(message: str) -> None:
+            if progress is not None:
+                progress(message)
+
+        for position, source_id in enumerate(pending, start=1):
             entry = registry.by_id(source_id)
             budget = budgets[source_id]
+            _say(f"L0 [{position}/{total}] {source_id}: collecting")
             try:
                 plugin = load(entry)
             except PluginContractError as exc:
@@ -476,6 +483,7 @@ def run_l0(
                 if not dry_run:
                     _record_outcome(session, run_id=run_id, outcome=outcome)
                     session.commit()
+                _say(f"L0 [{position}/{total}] {source_id}: skipped (no plugin yet)")
                 continue
             spent_before = budget.spent_today
 
@@ -499,6 +507,11 @@ def run_l0(
                 source_id=source_id,
                 status=outcome.status,
                 items_new=outcome.items_new,
+            )
+            _say(
+                f"L0 [{position}/{total}] {source_id}: {outcome.status} "
+                f"(new={outcome.items_new} parsed={outcome.signals_parsed} "
+                f"requests={outcome.quota_spent})"
             )
 
             if not dry_run:

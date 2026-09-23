@@ -373,6 +373,7 @@ def extract_products(
     bypass_cache: bool = False,
     write_cache: bool = True,
     run_gate: Callable[..., GatewayOutcome] | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> ExtractReport:
     """Extract products chunk by chunk, grounding every ref in code.
 
@@ -382,6 +383,7 @@ def extract_products(
         dry_run: count the chunks, call nobody, resolve nothing.
         write_cache: skip cache writes (the heuristic stand-in always passes False: its
             answers must never be cached as model output).
+        progress: called with one line per chunk (index, provider, cached/live, yield).
     """
     report = ExtractReport(chunks=len(chunks))
     if not chunks:
@@ -398,7 +400,8 @@ def extract_products(
     gate = run_gate or call_gate
     resolved_batches: list[list[ResolvedProduct]] = []
 
-    for chunk in chunks:
+    total = len(chunks)
+    for position, chunk in enumerate(chunks, start=1):
         wall = _budget_wall(report, limits=limits, calls_spent=calls_spent,
                             tokens_spent=tokens_spent)
         if wall:
@@ -442,6 +445,13 @@ def extract_products(
         if not resolved:
             report.empty_chunks += 1
         resolved_batches.append(resolved)
+        if progress is not None:
+            served = "cached" if outcome.cached else f"{outcome.provider}:{outcome.model}"
+            progress(
+                f"L1 extract [{position}/{total}] {served} "
+                f"({outcome.prompt_tokens + outcome.completion_tokens} tok) -> "
+                f"{len(resolved)} product(s), {invented} invented ref(s) dropped"
+            )
 
     report.products = tuple(union_products(resolved_batches))
     if report.status == "ok" and report.attempted < len(chunks):

@@ -9,7 +9,7 @@ again — the snapshot's unique key enforces that in the database rather than in
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -172,6 +172,7 @@ def run_decide(
     bypass_cache: bool = False,
     dry_run: bool = False,
     top: int = 10,
+    progress: Callable[[str], None] | None = None,
 ) -> DecideReport:
     """Extract products from the lake window, score what survives, append the snapshots.
 
@@ -216,6 +217,13 @@ def run_decide(
             min_keep=min_keep,
         )
 
+        if progress is not None:
+            kind = (
+                "heuristic stand-in"
+                if sender is None or getattr(sender, "is_heuristic", False)
+                else "live provider"
+            )
+            progress(f"L1 decide: {len(points)} lake points -> {len(chunks)} chunk(s), {kind}")
         scoring, mining_note, status = _extract_and_rank(
             session,
             points=points,
@@ -236,7 +244,10 @@ def run_decide(
             extractor_tokens_spent=extractor_tokens_spent,
             bypass_cache=bypass_cache,
             dry_run=dry_run,
+            progress=progress,
         )
+        if progress is not None:
+            progress(f"L1/L3 decide: scored {scoring.scored} candidate(s), status {status}")
         ledger_note = (
             f"{mining_note} | {scoring.summary()} | weights {weights.version}"
             + (" | DRY RUN: nothing written" if dry_run else "")
@@ -336,6 +347,7 @@ def _extract_and_rank(
     extractor_tokens_spent: int,
     bypass_cache: bool,
     dry_run: bool,
+    progress: Callable[[str], None] | None = None,
 ) -> tuple[L3Report, str, str]:
     """Run the Extractor gate, rank what it found, score the survivors.
 
@@ -362,6 +374,7 @@ def _extract_and_rank(
         dry_run=dry_run and not heuristic,
         bypass_cache=bypass_cache,
         write_cache=not heuristic and not dry_run,
+        progress=progress,
     )
     mining.chunks = extraction.chunks
     mining.attempted = extraction.attempted
