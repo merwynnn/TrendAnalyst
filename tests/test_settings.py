@@ -7,6 +7,7 @@ machine's real `config/secrets.local.yaml`, on a database, or on the network.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -40,9 +41,15 @@ def config_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No ambient TA_* variables may reach a test."""
-    for name in (PROBE_ENV_VAR, "TA_ENV", "TA_CONFIG_DIR"):
-        monkeypatch.delenv(name, raising=False)
+    """No ambient TA_* variables may reach a test.
+
+    CI exports TA_DB__URL/TA_TEST_DB_URL job-wide for the database tests, and without
+    this the file-layer tests below read CI's database instead of their throwaway
+    config dir — five failures that only ever happen on CI, never locally.
+    """
+    for name in list(os.environ):
+        if name.startswith("TA_"):
+            monkeypatch.delenv(name, raising=False)
 
 
 def write_layer(directory: Path, name: str, body: str) -> Path:
