@@ -172,6 +172,9 @@ def run_nightly(
         f"nightly run — {'OFFLINE' if offline else 'LIVE'}"
         f"{' (dry run)' if dry_run else ''}: collecting, extracting, judging, writing"
     )
+    # Name the target in the log: runs have landed on the wrong database before, and the
+    # progress lines are the only record a live run leaves. Host + database, never credentials.
+    _say(f"target database: {_describe_target(engine)}")
     source_ids, offline_note = _resolve_offline_sources(
         registry=registry, offline=offline, fixtures_dir=fixtures_dir, source_ids=source_ids
     )
@@ -448,6 +451,15 @@ def _resolve_offline_sources(
         f"offline: replaying {len(replayable)} recorded source(s) of {len(enabled)} enabled; "
         f"not recorded: {missing}"
     )
+
+
+def _describe_target(engine: Any) -> str:
+    """Host + database for the progress header — enough to tell neondb from the test DB."""
+    try:
+        url = engine.url  # type: ignore[union-attr]
+        return f"{url.database} @ {url.host}"
+    except Exception:
+        return "unknown"
 
 
 def _run_ttl(session: Session, *, as_of: datetime, dry_run: bool) -> Any:

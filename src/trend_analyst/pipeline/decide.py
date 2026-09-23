@@ -200,9 +200,13 @@ def run_decide(
 
         # The lake is the input: every text-bearing signal in the window, and its values
         # normalized per source so an upvote and a pageview can share one scale.
+        # Committed at once: extraction below takes minutes per provider call (and the
+        # parallel workers never touch this session), so any transaction left open here
+        # would die of Neon's idle-in-transaction timeout long before scoring runs.
         points = load_attention_points(
             session, as_of=as_of, window_days=window_days, source_ids=source_ids
         )
+        session.commit()
         # Identical (source, text, timestamp) rows are the same utterance stored twice
         # (one signal per metric): extracting both would pay twice for one text. Genuine
         # reposts differ in timestamp and survive.
