@@ -165,9 +165,21 @@ def test_unknown_key_is_an_error(config_dir: Path) -> None:
 
 
 def test_non_postgres_dsn_is_an_error(config_dir: Path) -> None:
-    write_layer(config_dir, "secrets.local.yaml", 'db:\n  url: "mysql://u:p@localhost/db"\n')
+    write_layer(config_dir, "secrets.local.yaml", 'db:\n  url: "***localhost/db"\n')
     with pytest.raises(ConfigError, match="PostgreSQL SQLAlchemy DSN"):
         load_settings(config_dir, env_name="dev")
+
+
+def test_bare_postgres_scheme_gets_this_projects_driver(config_dir: Path) -> None:
+    """Consoles copy `postgresql://` with no driver — SQLAlchemy would then default to
+    psycopg2, which is not installed, and the failure surfaces far from the setting."""
+    write_layer(
+        config_dir, "secrets.local.yaml",
+        'db:\n  url: "postgresql://u:p@localhost:5432/db"\n',
+    )
+    settings = load_settings(config_dir, env_name="dev")
+    assert settings.db.dsn.startswith("postgresql+psycopg://")
+    assert settings.db.dsn.endswith("/db")
 
 
 def test_inverted_keep_rate_band_is_an_error(config_dir: Path) -> None:

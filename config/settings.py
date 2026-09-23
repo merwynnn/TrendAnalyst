@@ -34,6 +34,7 @@ from pydantic_settings import (
     SettingsConfigDict,
     YamlConfigSettingsSource,
 )
+from sqlalchemy.engine import make_url
 
 __all__ = [
     "AppSection",
@@ -106,8 +107,17 @@ class DatabaseSection(BaseModel):
 
     @property
     def dsn(self) -> str:
-        """The plain DSN — call this only where a driver needs the real value."""
-        return self.url.get_secret_value()
+        """The plain DSN — call this only where a driver needs the real value.
+
+        A bare `postgresql://` scheme (exactly what consoles copy) is normalized to
+        this project's driver (`postgresql+psycopg://`): without it SQLAlchemy falls
+        back to psycopg2, which is not installed, and the failure surfaces far from
+        the setting that caused it.
+        """
+        url = make_url(self.url.get_secret_value())
+        if url.drivername in {"postgres", "postgresql"}:
+            url = url.set(drivername="postgresql+psycopg")
+        return url.render_as_string(hide_password=False)
 
     @field_validator("url")
     @classmethod
