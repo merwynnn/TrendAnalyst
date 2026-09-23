@@ -182,6 +182,18 @@ def test_bare_postgres_scheme_gets_this_projects_driver(config_dir: Path) -> Non
     assert settings.db.dsn.endswith("/db")
 
 
+def test_pooler_hostname_becomes_the_direct_host(config_dir: Path) -> None:
+    """The pooler rejects lock_timeout, which migrations set — so the pooled string
+    pasted from a console can never work here, and is rewritten to direct."""
+    write_layer(
+        config_dir, "secrets.local.yaml",
+        'db:\n  url: "postgresql://u:p@ep-abc-pooler.c-2.eu-west-2.aws.neon.tech/db"\n',
+    )
+    settings = load_settings(config_dir, env_name="dev")
+    assert "ep-abc.c-2.eu-west-2.aws.neon.tech" in settings.db.dsn
+    assert "-pooler." not in settings.db.dsn
+
+
 def test_inverted_keep_rate_band_is_an_error(config_dir: Path) -> None:
     write_layer(config_dir, "settings.yaml", "health:\n  judge_keep_rate_band: [0.6, 0.1]\n")
     with pytest.raises(ConfigError, match="judge_keep_rate_band"):

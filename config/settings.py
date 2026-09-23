@@ -109,14 +109,19 @@ class DatabaseSection(BaseModel):
     def dsn(self) -> str:
         """The plain DSN — call this only where a driver needs the real value.
 
-        A bare `postgresql://` scheme (exactly what consoles copy) is normalized to
-        this project's driver (`postgresql+psycopg://`): without it SQLAlchemy falls
-        back to psycopg2, which is not installed, and the failure surfaces far from
-        the setting that caused it.
+        Two normalizations for verbatim console copies:
+        * a bare `postgresql://` scheme becomes this project's driver
+          (`postgresql+psycopg://`) — otherwise SQLAlchemy falls back to psycopg2,
+          which is not installed, and the failure surfaces far from the cause;
+        * a `-pooler` hostname becomes the direct host — the pooler rejects
+          `lock_timeout` as a startup parameter, and migrations (plus statement
+          timeouts) set it, so the pooled string can never work here.
         """
         url = make_url(self.url.get_secret_value())
         if url.drivername in {"postgres", "postgresql"}:
             url = url.set(drivername="postgresql+psycopg")
+        if url.host is not None and "-pooler." in url.host:
+            url = url.set(host=url.host.replace("-pooler.", "."))
         return url.render_as_string(hide_password=False)
 
     @field_validator("url")
