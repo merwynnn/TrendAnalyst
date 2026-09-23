@@ -375,12 +375,15 @@ def test_dry_run_calls_nobody_and_writes_nothing(sessions: sessionmaker[Session]
         return verdict_json(), 1, 1
 
     with sessions() as session:
+        before = len(session.execute(select(LLMCache)).scalars().all())
         outcome = call_gate(
             session, gate="judge", prompt="p", schema=JudgeVerdict, sender=counting, dry_run=True,
         )
         assert outcome.status == "skipped"
         assert calls == []
-        assert session.execute(select(LLMCache)).all() == []
+        # Counted, not emptiness-asserted: the shared test database may hold rows from
+        # a live run pointed at it by mistake, and a dry run must add none regardless.
+        assert len(session.execute(select(LLMCache)).scalars().all()) == before
 
 
 def test_accounting_lands_in_the_token_log(
@@ -438,6 +441,27 @@ def test_default_chain_matches_the_specification() -> None:
         if name not in seen:
             seen.append(name)
     assert seen == ["gemini", "groq", "cerebras", "ollama"]
+
+
+def test_no_transaction_spans_the_provider_call(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Neon kills idle-in-transaction connections: the gateway commits before calling,
+    so a slow provider can never strand the session mid-transaction."""
+    with sessions() as session:
+        in_transaction_at_call: list[bool] = []
+
+        def watching_sender(provider: ProviderSpec, prompt: str) -> tuple[str, int, int]:
+            in_transaction_at_call.append(session.in_transaction())
+            return verdict_json(), 10, 5
+
+        outcome = call_gate(
+            session, gate="judge", prompt="p", schema=JudgeVerdict,
+            sender=watching_sender, evidence_urls=EVIDENCE, now=NOW,
+        )
+    assert outcome.ok
+    assert in_transaction_at_call, "the provider was actually called"
+    assert not any(in_transaction_at_call), "every call ran outside a transaction"
 
 
 def test_outcome_serializes_for_the_ledger(sessions: sessionmaker[Session]) -> None:

@@ -231,12 +231,14 @@ def test_dry_run_writes_no_cache_rows(sessions: sessionmaker[Session]) -> None:
     """The heuristic may run, but its answers must never sit in the cache."""
     chunks, _ = build_chunks(texts(3), chunk_size=30)
     with sessions() as session:
+        before = len(session.execute(select(LLMCache)).scalars().all())
         report = extract_products(
             session, chunks, sender=fixed_sender(answer_json()),
             dry_run=True, write_cache=False,
         )
         assert report.status == "dry-run"
-        assert session.execute(select(LLMCache)).scalars().all() == []
+        # Counted, not emptiness-asserted: see test_llm's dry-run test for why.
+        assert len(session.execute(select(LLMCache)).scalars().all()) == before
 
 
 @pytest.mark.db

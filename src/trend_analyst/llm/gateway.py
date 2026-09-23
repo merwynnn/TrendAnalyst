@@ -333,6 +333,13 @@ def call_gate(
             reason="dry run: the provider was not called",
         )
 
+    # No transaction may span the provider calls below: a single slow call (retries
+    # across a 9-provider chain) outlasts Neon's idle-in-transaction timeout, and the
+    # next statement then dies with IdleInTransactionSessionTimeout far from the cause.
+    # Committing here only persists complete, idempotent rows (cache entries, judgements
+    # from earlier batches); a fresh transaction begins on the next touch.
+    session.commit()
+
     attempts = 0
     failures: list[str] = []
 
