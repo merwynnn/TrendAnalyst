@@ -34,7 +34,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from sqlalchemy import Engine, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -224,6 +224,13 @@ def _store_raw(session: Session, *, run_id: str, batch: RawBatch) -> bool:
     return inserted is not None
 
 
+#: Rows per signal INSERT. A source batch (~1.2k rows on a busy night) as one statement
+#: outruns the 30s statement timeout on Neon — the conflict check walks a big unique
+#: index per row — so batches stay small and the count sums over them. Same rows, same
+#: idempotence, no single statement the timeout can catch.
+_SIGNALS_BATCH_ROWS: Final = 250
+
+
 def _store_signals(session: Session, signals: Sequence[Any]) -> int:
     """Insert signals, ignoring ones already known. Returns how many were new.
 
@@ -250,13 +257,16 @@ def _store_signals(session: Session, signals: Sequence[Any]) -> int:
     # RETURNING, not rowcount: for INSERT..ON CONFLICT DO NOTHING psycopg reports -1 as
     # the row count, which would report "-1 new signals" — a silent lie about the work done.
     signals_table = SignalRow.metadata.tables["signals"]
-    statement = (
-        pg_insert(signals_table)
-        .values(rows)
-        .on_conflict_do_nothing(index_elements=["source_id", "entity", "metric", "ts"])
-        .returning(signals_table.c.id)
-    )
-    return len(session.execute(statement).scalars().all())
+    new = 0
+    for start in range(0, len(rows), _SIGNALS_BATCH_ROWS):
+        statement = (
+            pg_insert(signals_table)
+            .values(rows[start : start + _SIGNALS_BATCH_ROWS])
+            .on_conflict_do_nothing(index_elements=["source_id", "entity", "metric", "ts"])
+            .returning(signals_table.c.id)
+        )
+        new += len(session.execute(statement).scalars().all())
+    return new
 
 
 def collect_one(  # noqa: PLR0911 — one return per outcome is clearer than a status variable
