@@ -27,7 +27,7 @@ from trend_analyst.pipeline.decide import run_decide
 from trend_analyst.pipeline.layers.l1 import rank_products
 from trend_analyst.scoring.features import SignalPoint
 from trend_analyst.scoring.passion import category_passion
-from trend_analyst.store.models import Run, SignalRow
+from trend_analyst.store.models import Judgement, Run, SignalRow
 from trend_analyst.store.snapshots import latest_ranked
 
 NOW = datetime(2026, 9, 20, tzinfo=UTC)
@@ -239,35 +239,46 @@ def test_dashboard_renders_every_idea_with_its_why(
     with sessions() as session:
         ideas = latest_ranked(session, limit=100)
         phrase = ideas[0].phrase
-        session.add(
-            Run(
-                status="ok",
-                trigger="nightly",
-                started_at=NOW,
-                finished_at=NOW,
-                layer_status={
-                    "L1": {
-                        "dropped": [
-                            {
-                                "phrase": "also-ran widget",
-                                "category": "tools_diy",
-                                "reason": "below the velocity shortlist (rank 9 of 9)",
-                            }
-                        ]
-                    },
-                    "pain": {
-                        "status": "ok",
-                        "niches": {
-                            "tools_diy": {
-                                "pain_score": 72.0,
-                                "painful_problem": "drill holes cost renters deposits",
-                                "rationale": "workarounds everywhere",
-                                "representative_phrases": [phrase],
-                            }
-                        },
+        run_row = Run(
+            status="ok",
+            trigger="nightly",
+            started_at=NOW,
+            finished_at=NOW,
+            layer_status={
+                "L1": {
+                    "dropped": [
+                        {
+                            "phrase": "also-ran widget",
+                            "category": "tools_diy",
+                            "reason": "below the velocity shortlist (rank 9 of 9)",
+                        }
+                    ]
+                },
+                "pain": {
+                    "status": "ok",
+                    "niches": {
+                        "tools_diy": {
+                            "pain_score": 72.0,
+                            "painful_problem": "drill holes cost renters deposits",
+                            "rationale": "workarounds everywhere",
+                            "representative_phrases": [phrase],
+                        }
                     },
                 },
-                notes="test run",
+            },
+            notes="test run",
+        )
+        session.add(run_row)
+        session.flush()
+        session.add(
+            Judgement(
+                candidate_id=ideas[0].candidate_id,
+                run_id=run_row.id,
+                gate="judge",
+                decision="keep",
+                confidence=0.9,
+                reason="renters keep asking for it",
+                quotes=[{"text": "landlord keeps my deposit", "url": "https://example.com/t/1"}],
             )
         )
         # A newer stage row with no results (judge/writer rows carry none): the
@@ -293,3 +304,12 @@ def test_dashboard_renders_every_idea_with_its_why(
     assert "shortlist" in page
     assert "niche score" in page
     assert "<details>" in page  # expandable rows, no tabs
+    assert 'href="winners.html"' in page  # nav to the winners page
+    assert 'href="movers.html"' in page  # nav to the movers page
+    winners = (tmp_path / "winners.html").read_text(encoding="utf-8")
+    assert phrase in winners  # the kept idea is a winner…
+    assert "renters keep asking" in winners  # …with the judge's reason…
+    assert "judge: keep" in winners
+    movers = (tmp_path / "movers.html").read_text(encoding="utf-8")
+    assert phrase in movers  # one scored run so far: everything is new…
+    assert "First scored run" in movers
