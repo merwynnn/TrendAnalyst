@@ -170,6 +170,7 @@ publishes it to GitHub Pages — one-time setup: repo Settings → Pages → Sou
 |---|---|---|---|---|
 | Gemini (LLM) | **$0** — ~60 calls/night, ~4k tokens | free RPM/RPD; the free tier is what this system was drilled against | sustained 429s, or consistently >15k output tokens/night | per-gate token caps (planner 60k, judge 400k, writer 600k) refuse the call and report the gate as `capped` instead of spending |
 | Groq / Cerebras (failover) | **$0** — used only when Gemini refuses | free tiers | the same volume, on the fallback path | the chain stops at the first provider that answers; a 402 or 404 fails over instead of retrying |
+| OpenRouter free models (depth) | **$0** — 4 probed `:free` models after Groq | 20 RPM / 50 RPD **per model** | a full extractor night (~48 chunks) spends one model's day | 5s dispatch pause (≈12/min); a spent day 429s into the next entry |
 | Ollama (local) | **$0** | none — your own machine | never (it is local) | n/a |
 | eBay Browse (Tier-A) | **$0** — ~20 calls/night | 5,000 calls/day | >5,000 calls/day (≈250× this volume) | `budget_per_day: 500` per source in `sources.yaml`, enforced by a token bucket that refuses the call instead of spending |
 | GitHub (Tier-A) | **$0** | 5,000 req/hour (PAT) | >120,000 calls/day | same budget mechanism |

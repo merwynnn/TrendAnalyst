@@ -366,6 +366,21 @@ def test_extractor_chain_leads_lite() -> None:
     assert set(models) >= gemini_models, "same quota buckets, interrogated lite-first"
 
 
+def test_openrouter_free_models_ride_failover() -> None:
+    """Only live-probed free models sit in the chains, after the keyed providers."""
+    expected = [
+        "dots-studio/dots-3-note-preview:free",
+        "cohere/north-mini-code:free",
+        "qwen/qwen3.8-27b:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+    ]
+    for chain in (default_chain(), default_extractor_chain()):
+        models = [spec.model for spec in chain if spec.name == "openrouter"]
+        assert models == expected
+        names = [spec.name for spec in chain]
+        assert names.index("openrouter") > names.index("groq"), "free routing is depth"
+
+
 def test_prompt_bounds_products_and_truncates_texts() -> None:
     long_text = "word " * 400
     (chunk,), _ = build_chunks([(long_text, NOW, "arctic_shift")], chunk_size=30)

@@ -430,17 +430,17 @@ def test_default_chain_matches_the_specification() -> None:
     "experiencing high demand" for the drill's ~450-token prompt while small prompts succeeded,
     and the 2026-09-21 model probe proved the 3.x family are distinct rate-limit buckets (200
     for 3.5/3.6, 503-overload for 3.7/3.8 — real ids, not wrong names). The distinct-provider
-    order is still exactly Gemini -> Groq -> Cerebras -> Ollama.
+    order is Gemini -> Groq -> OpenRouter (live-probed free models) -> Cerebras -> Ollama.
     """
     chain = default_chain()
     names = [provider.name for provider in chain]
-    assert names == ["gemini"] * 6 + ["groq", "cerebras", "ollama"]
+    assert names == ["gemini"] * 6 + ["groq"] + ["openrouter"] * 4 + ["cerebras", "ollama"]
     assert len({provider.model for provider in chain if provider.name == "gemini"}) == 6
     seen: list[str] = []
     for name in names:
         if name not in seen:
             seen.append(name)
-    assert seen == ["gemini", "groq", "cerebras", "ollama"]
+    assert seen == ["gemini", "groq", "openrouter", "cerebras", "ollama"]
 
 
 def test_no_transaction_spans_the_provider_call(

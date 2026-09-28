@@ -90,6 +90,16 @@ DEFAULT_CHAIN: Final[tuple[tuple[str, str], ...]] = (
     # gpt-oss-120b among 13 available models. Picking the same model Cerebras serves keeps the
     # fallback semantically identical, so a failover changes who answers, not what is answered.
     ("groq", "openai/gpt-oss-120b"),
+    # OpenRouter free models, each probed live with a JSON prompt before admission
+    # (2026-09-28: 16 free text models tried, 9 answered clean JSON). Limits are
+    # 20 RPM / 50 RPD *per model* — the 5s dispatch pause keeps the stream near
+    # 12/min, and a spent day reads as 429, which fails over to the next entry.
+    # Order is probe speed with clean output: dots, north-mini-code, qwen, super.
+    # Deliberately after the keyed providers: free routing is best-effort depth.
+    ("openrouter", "dots-studio/dots-3-note-preview:free"),
+    ("openrouter", "cohere/north-mini-code:free"),
+    ("openrouter", "qwen/qwen3.8-27b:free"),
+    ("openrouter", "nvidia/nemotron-3-super-120b-a12b:free"),
     ("cerebras", "gpt-oss-120b"),
     ("ollama", "llama3.2"),
 )
@@ -121,7 +131,7 @@ class ProviderSpec:
 
 
 def default_chain() -> tuple[ProviderSpec, ...]:
-    """Gemini Flash -> Groq -> Cerebras -> local Ollama."""
+    """Gemini Flash -> Groq -> OpenRouter free models -> Cerebras -> local Ollama."""
     return tuple(ProviderSpec(name=name, model=model) for name, model in DEFAULT_CHAIN)
 
 
@@ -137,6 +147,10 @@ EXTRACTOR_CHAIN: Final[tuple[tuple[str, str], ...]] = (
     ("gemini", "gemini-3.8-flash"),
     ("gemini", "gemini-flash-latest"),
     ("groq", "openai/gpt-oss-120b"),
+    ("openrouter", "dots-studio/dots-3-note-preview:free"),
+    ("openrouter", "cohere/north-mini-code:free"),
+    ("openrouter", "qwen/qwen3.8-27b:free"),
+    ("openrouter", "nvidia/nemotron-3-super-120b-a12b:free"),
     ("cerebras", "gpt-oss-120b"),
     ("ollama", "llama3.2"),
 )
