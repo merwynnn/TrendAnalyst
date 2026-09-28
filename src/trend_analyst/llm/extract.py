@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -93,6 +94,13 @@ MAX_PRODUCTS_PER_CHUNK: Final = 40
 #: downstream — this only trims what the prompt carries. Product talk declares itself
 #: early (titles, opening complaints); the tail is rarely where the product is.
 TEXT_TRUNCATE_CHARS: Final = 500
+
+#: Consecutive full-chain chunk failures that stop the run early. One failed chunk is
+#: ~27 doomed calls the budget wall never sees (it counts successes), so five in a
+#: row with no success between them is proof the chain is down, not a blip — a blip
+#: would not survive 3 transient retries on each of 9 providers. Remaining chunks stay
+#: unattempted (honest partial, retried next run) rather than failed.
+_FAIL_STREAK_STOP: Final = 5
 
 #: Template, not the prompt: {max_products} is filled per call, so the doubled
 #: braces are literal JSON braces, not format fields.
@@ -172,6 +180,10 @@ class ExtractReport:
     #: once reported only "46 failed" — the count without the cause, which is how a
     #: quota outage reads as a pipeline bug. Truncated: counting, not archiving.
     fail_reasons: dict[str, int] = field(default_factory=dict)
+    #: Consecutive full-chain failures. The budget wall counts successful calls, so a
+    #: dead chain burns ~27 doomed calls per chunk with no backstop — this streak is
+    #: the backstop: at the threshold the run stops dispatching and says why.
+    consecutive_failures: int = 0
 
     @property
     def kept(self) -> int:
@@ -557,6 +569,32 @@ def _apply_chunk(
     )
 
 
+def _streak_stop_reason(streak: int, top_reason: str) -> str:
+    """Why the run stopped dispatching: the chain is down, not flaky."""
+    reason = (
+        f"stopped after {streak} consecutive chunk failures with no success between "
+        "them: the provider chain is down, not flaky"
+    )
+    if top_reason:
+        reason += f" (top: {top_reason[:160]})"
+    return reason + "; remaining chunks unprocessed rather than failed"
+
+
+def _note_chunk_failure(report: ExtractReport, reason: str) -> str:
+    """Count one failed chunk; trip the breaker on a streak. Returns stop/continue."""
+    report.failed_chunks += 1
+    key = (reason or "unknown").strip()[:160] or "unknown"
+    report.fail_reasons[key] = report.fail_reasons.get(key, 0) + 1
+    report.consecutive_failures += 1
+    if report.consecutive_failures >= _FAIL_STREAK_STOP:
+        report.status = "partial"
+        report.reason = _streak_stop_reason(
+            report.consecutive_failures, report.top_fail_reason
+        )
+        return "stop"
+    return "continue"
+
+
 def _record_outcome(
     report: ExtractReport,
     chunk: Sequence[ChunkText],
@@ -573,12 +611,10 @@ def _record_outcome(
         report.reason = outcome.reason
         return "stop"
     if not outcome.ok or not isinstance(outcome.value, ExtractorOutput):
-        report.failed_chunks += 1
-        reason = (outcome.reason or "unknown").strip()[:160] or "unknown"
-        report.fail_reasons[reason] = report.fail_reasons.get(reason, 0) + 1
         if progress is not None:
             progress(f"L1 extract [{position}/{total}] failed: {outcome.reason[:120]}")
-        return "continue"
+        return _note_chunk_failure(report, outcome.reason)
+    report.consecutive_failures = 0
     report.calls += 1
     if outcome.cached:
         report.cached += 1
@@ -632,9 +668,40 @@ def _extract_parallel(
     total = len(chunks)
     pending: list[tuple[int, concurrent.futures.Future[GatewayOutcome]]] = []
     stopped = False
+    # Tripwire for a dead chain: worker threads must never touch the report (the merge
+    # loop owns all counting), so completions only flip a lock-guarded flag the dispatch
+    # loop reads. A few extra submits may slip through the race — accepted and stated:
+    # this is a backstop against burning quota, not accounting.
+    trip_lock = threading.Lock()
+    trip = {"streak": 0, "stopped": False}
+
+    def _watch(future: concurrent.futures.Future[GatewayOutcome]) -> None:
+        try:
+            outcome = future.result()
+        except Exception:
+            failed, capped = True, False
+        else:
+            failed = not outcome.ok or not isinstance(outcome.value, ExtractorOutput)
+            capped = outcome.capped
+        with trip_lock:
+            if capped:
+                trip["stopped"] = True
+            elif failed:
+                trip["streak"] += 1
+                if trip["streak"] >= _FAIL_STREAK_STOP:
+                    trip["stopped"] = True
+            else:
+                trip["streak"] = 0
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         for position, chunk in enumerate(chunks, start=1):
-            if stopped:
+            with trip_lock:
+                tripped = trip["stopped"]
+            if stopped or tripped:
+                if tripped and report.status != "partial":
+                    report.status = "partial"
+                    report.reason = _streak_stop_reason(_FAIL_STREAK_STOP, "")
+                stopped = True
                 break
             if position > 1 and dispatch_pause_s > 0:
                 time.sleep(dispatch_pause_s)
@@ -646,32 +713,50 @@ def _extract_parallel(
                 stopped = True
                 break
             report.attempted += 1
-            pending.append((position, pool.submit(
+            future = pool.submit(
                 _extract_one,
                 gate=gate, session_factory=session_factory, chunk=chunk,
                 sender=sender, providers=providers, limits=limits,
                 calls_spent=calls_spent, tokens_spent=tokens_spent, now=now,
                 bypass_cache=bypass_cache, write_cache=write_cache,
-            )))
-        # Merge in submission order even though workers finish out of order.
-        for position, future in pending:
-            if stopped and report.status == "partial":
-                future.cancel()
-                continue
-            try:
-                outcome = future.result()
-            except Exception as exc:  # a dead worker is a failed chunk, never a crash
-                report.failed_chunks += 1
-                reason = f"worker failed: {exc}".strip()[:160]
-                report.fail_reasons[reason] = report.fail_reasons.get(reason, 0) + 1
-                if progress is not None:
-                    progress(f"L1 extract [{position}/{total}] worker failed: {exc}"[:160])
-                continue
-            if _record_outcome(
-                report, chunks[position - 1], resolved_batches, outcome,
-                position=position, total=total, progress=progress,
-            ) == "stop":
+            )
+            future.add_done_callback(_watch)
+            pending.append((position, future))
+        stopped = _fold_pending(
+            report, chunks, pending, resolved_batches,
+            total=total, progress=progress, stopped=stopped,
+        )
+
+
+def _fold_pending(
+    report: ExtractReport,
+    chunks: Sequence[Sequence[ChunkText]],
+    pending: list[tuple[int, concurrent.futures.Future[GatewayOutcome]]],
+    resolved_batches: list[list[ResolvedProduct]],
+    *,
+    total: int,
+    progress: Callable[[str], None] | None,
+    stopped: bool,
+) -> bool:
+    """Merge worker outcomes strictly in submission order. Returns the stop flag."""
+    for position, future in pending:
+        if stopped and report.status == "partial":
+            future.cancel()
+            continue
+        try:
+            outcome = future.result()
+        except Exception as exc:  # a dead worker is a failed chunk, never a crash
+            if progress is not None:
+                progress(f"L1 extract [{position}/{total}] worker failed: {exc}"[:160])
+            if _note_chunk_failure(report, f"worker failed: {exc}") == "stop":
                 stopped = True
+            continue
+        if _record_outcome(
+            report, chunks[position - 1], resolved_batches, outcome,
+            position=position, total=total, progress=progress,
+        ) == "stop":
+            stopped = True
+    return stopped
 
 
 def _extract_one(

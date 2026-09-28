@@ -313,6 +313,44 @@ def test_dispatch_pause_paces_without_changing_results(
 
 
 @pytest.mark.db
+def test_consecutive_failures_stop_the_run_early(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Five straight full-chain failures means the chain is down: stop dispatching."""
+    def failing(_provider: ProviderSpec, _prompt: str) -> tuple[str, int, int]:
+        raise RuntimeError("HTTP 429: quota exhausted")
+
+    chunks, _ = build_chunks(texts(200), chunk_size=30)
+    assert len(chunks) == 7
+    with sessions() as session:
+        report = extract_products(session, chunks, sender=failing)
+    assert report.attempted == 5  # the 6th and 7th were never dispatched
+    assert report.failed_chunks == 5
+    assert report.status == "partial"
+    assert "consecutive" in report.reason
+    assert "429" in report.reason  # the cause travels with the stop
+
+
+@pytest.mark.db
+def test_parallel_tripwire_stops_a_dead_chain(
+    sessions: sessionmaker[Session],
+) -> None:
+    """The submit loop watches completions: a dead chain stops the burst too."""
+    def failing(_provider: ProviderSpec, _prompt: str) -> tuple[str, int, int]:
+        raise RuntimeError("HTTP 429: quota exhausted")
+
+    chunks, _ = build_chunks(texts(200), chunk_size=30)
+    with sessions() as session:
+        report = extract_products(
+            session, chunks, sender=failing, max_workers=2,
+            session_factory=sessions, dispatch_pause_s=0.2,
+        )
+    assert report.attempted < len(chunks)  # the tail was never dispatched
+    assert report.status == "partial"
+    assert "consecutive" in report.reason
+
+
+@pytest.mark.db
 def test_replay_is_deterministic_through_the_cache(
     sessions: sessionmaker[Session],
 ) -> None:
