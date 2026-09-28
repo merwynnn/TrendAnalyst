@@ -295,6 +295,24 @@ def test_failed_chunks_carry_their_cause(
 
 
 @pytest.mark.db
+def test_dispatch_pause_paces_without_changing_results(
+    sessions: sessionmaker[Session],
+) -> None:
+    """A pause between dispatches must not change what extraction finds."""
+    chunks, _ = build_chunks(texts(65), chunk_size=30)
+    with sessions() as session:
+        plain = extract_products(session, chunks, sender=fixed_sender(answer_json()))
+    with sessions() as session:
+        paced = extract_products(
+            session, chunks, sender=fixed_sender(answer_json()), dispatch_pause_s=0.01,
+        )
+    assert [item.phrase for item in paced.products] == [
+        item.phrase for item in plain.products
+    ]
+    assert paced.calls == plain.calls
+
+
+@pytest.mark.db
 def test_replay_is_deterministic_through_the_cache(
     sessions: sessionmaker[Session],
 ) -> None:

@@ -153,6 +153,7 @@ def run_nightly(
     run_ttl: bool = True,
     progress: Callable[[str], None] | None = None,
     extractor_workers: int = 4,
+    extract_pause_s: float = 0.0,
 ) -> NightlyReport:
     """Run every layer once, single-shot.
 
@@ -210,6 +211,7 @@ def run_nightly(
         top=top_k,
         progress=progress,
         max_workers=extractor_workers,
+        dispatch_pause_s=extract_pause_s,
     )
     report.decide_status = decide.status
     report.candidates_scored = decide.scoring.scored
@@ -505,6 +507,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--extract-workers", type=int, default=4,
         help="parallel extractor calls (1 is sequential; higher is faster to the caps)",
     )
+    parser.add_argument(
+        "--extract-pause", type=float, default=4.0,
+        help="seconds between extractor dispatches: free-tier limits are per-minute, "
+        "and bursting 4 workers at full prompts 429s even with daily quota left",
+    )
     args = parser.parse_args(argv)
 
     config_dir = Path(args.config_dir) if args.config_dir else default_config_dir()
@@ -559,6 +566,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_ttl=not args.no_ttl,
             progress=None if args.quiet else _progress,
             extractor_workers=args.extract_workers,
+            extract_pause_s=args.extract_pause,
         )
     finally:
         engine.dispose()

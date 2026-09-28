@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -429,6 +430,7 @@ def extract_products(
     progress: Callable[[str], None] | None = None,
     max_workers: int = 1,
     session_factory: Callable[[], Session] | None = None,
+    dispatch_pause_s: float = 0.0,
 ) -> ExtractReport:
     """Extract products chunk by chunk, grounding every ref in code.
 
@@ -446,6 +448,12 @@ def extract_products(
             `session_factory`, which is required when max_workers > 1. Caps are checked
             before each dispatch, so in-flight calls can overshoot them by at most the
             worker count — bounded and stated, not silent.
+        dispatch_pause_s: seconds between chunk dispatches. Free-tier limits are
+            per-minute as well as per-day, and four workers bursting at ~15k-token
+            prompts 429 even a model with daily headroom (a night once lost 46 of 48
+            chunks this way). A pause bounds the dispatch rate — with 10s calls and a
+            4s pause, ~3 calls overlap and dispatches stay near 15/min — while slow
+            calls still overlap, so it paces without serializing.
     """
     report = ExtractReport(chunks=len(chunks))
     if not chunks:
@@ -471,10 +479,12 @@ def extract_products(
             gate=gate, session_factory=session_factory, sender=sender, providers=providers,
             limits=limits, calls_spent=calls_spent, tokens_spent=tokens_spent, now=now,
             bypass_cache=bypass_cache, write_cache=write_cache, progress=progress,
-            max_workers=max_workers,
+            max_workers=max_workers, dispatch_pause_s=dispatch_pause_s,
         )
     else:
         for position, chunk in enumerate(chunks, start=1):
+            if position > 1 and dispatch_pause_s > 0:
+                time.sleep(dispatch_pause_s)
             if _apply_chunk(
                 report, chunk, resolved_batches, position=position, total=total,
                 gate=gate, session=session, sender=sender, providers=providers,
@@ -607,6 +617,7 @@ def _extract_parallel(
     write_cache: bool,
     progress: Callable[[str], None] | None,
     max_workers: int,
+    dispatch_pause_s: float = 0.0,
 ) -> None:
     """Run chunks concurrently, merging strictly in submission order.
 
@@ -624,6 +635,8 @@ def _extract_parallel(
         for position, chunk in enumerate(chunks, start=1):
             if stopped:
                 break
+            if position > 1 and dispatch_pause_s > 0:
+                time.sleep(dispatch_pause_s)
             wall = _budget_wall(report, limits=limits, calls_spent=calls_spent,
                                 tokens_spent=tokens_spent)
             if wall:
