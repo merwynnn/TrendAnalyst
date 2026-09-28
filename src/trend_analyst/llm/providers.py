@@ -38,6 +38,7 @@ PROVIDER_DOMAINS: Final[frozenset[str]] = frozenset(
         "generativelanguage.googleapis.com",
         "api.groq.com",
         "api.cerebras.ai",
+        "openrouter.ai",
         "localhost",
         "127.0.0.1",
     }
@@ -48,6 +49,7 @@ _GEMINI_URL: Final = (
 )
 _GROQ_URL: Final = "https://api.groq.com/openai/v1/chat/completions"
 _CEREBRAS_URL: Final = "https://api.cerebras.ai/v1/chat/completions"
+_OPENROUTER_URL: Final = "https://openrouter.ai/api/v1/chat/completions"
 
 #: First HTTP status that counts as a failure worth failing over for.
 _HTTP_ERROR: Final = 400
@@ -115,11 +117,20 @@ def _gemini(
 
 
 def _openai_shaped(
-    provider: ProviderSpec, prompt: str, *, url: str, api_key: str, timeout_s: float
+    provider: ProviderSpec,
+    prompt: str,
+    *,
+    url: str,
+    api_key: str,
+    timeout_s: float,
+    extra_headers: Mapping[str, str] | None = None,
 ) -> tuple[str, int, int]:
+    headers = {"content-type": "application/json", "authorization": f"Bearer {api_key}"}
+    if extra_headers:
+        headers.update(dict(extra_headers))
     payload = _post(
         url,
-        headers={"content-type": "application/json", "authorization": f"Bearer {api_key}"},
+        headers=headers,
         body={
             "model": provider.model,
             "messages": [{"role": "user", "content": prompt}],
@@ -176,6 +187,7 @@ def settings_sender(
         "gemini": _secret(getattr(llm, "gemini_api_key", None)),
         "groq": _secret(getattr(llm, "groq_api_key", None)),
         "cerebras": _secret(getattr(llm, "cerebras_api_key", None)),
+        "openrouter": _secret(getattr(llm, "openrouter_api_key", None)),
         "ollama": "",
     }
     if clients:
@@ -198,6 +210,19 @@ def settings_sender(
         if provider.name == "cerebras":
             return _openai_shaped(
                 provider, prompt, url=_CEREBRAS_URL, api_key=key, timeout_s=timeout_s
+            )
+        if provider.name == "openrouter":
+            # OpenRouter asks for app identification; harmless and recommended.
+            return _openai_shaped(
+                provider,
+                prompt,
+                url=_OPENROUTER_URL,
+                api_key=key,
+                timeout_s=timeout_s,
+                extra_headers={
+                    "http-referer": "https://github.com/merwynnn/TrendAnalyst",
+                    "x-title": "TrendAnalyst",
+                },
             )
         raise ProviderError(f"no transport implemented for provider {provider.name!r}")
 

@@ -11,7 +11,7 @@ name: pipeline-live
 #                        lock_timeout, which migrations set)
 #   GEMINI_API_KEY       primary LLM provider (Judge, Writer, Extractor)
 # Optional secrets (failover / enrichment stay skipped without them):
-#   GROQ_API_KEY, CEREBRAS_API_KEY, SEARCHAPI_KEY,
+#   GROQ_API_KEY, CEREBRAS_API_KEY, OPENROUTER_API_KEY, SEARCHAPI_KEY,
 #   PRODUCTHUNT_CLIENT_ID, PRODUCTHUNT_CLIENT_SECRET
 
 on:
@@ -51,6 +51,7 @@ jobs:
       TA_LLM__GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       TA_LLM__GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       TA_LLM__CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+      TA_LLM__OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       TA_TIER_A__SEARCHAPI_KEY: ${{ secrets.SEARCHAPI_KEY }}
       TA_TIER_A__PRODUCTHUNT_CLIENT_ID: ${{ secrets.PRODUCTHUNT_CLIENT_ID }}
       TA_TIER_A__PRODUCTHUNT_CLIENT_SECRET: ${{ secrets.PRODUCTHUNT_CLIENT_SECRET }}

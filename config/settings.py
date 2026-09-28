@@ -148,6 +148,7 @@ class LLMSection(BaseModel):
     gemini_api_key: SecretStr = SecretStr("")
     groq_api_key: SecretStr = SecretStr("")
     cerebras_api_key: SecretStr = SecretStr("")
+    openrouter_api_key: SecretStr = SecretStr("")
     ollama_base_url: str = "http://localhost:11434"
 
     @field_validator("ollama_base_url")
