@@ -92,8 +92,36 @@ jobs:
           if [ -n "${{ inputs.source }}" ]; then args="$args --source ${{ inputs.source }}"; fi
           uv run python -m scripts.nightly $args --json | tee nightly-live.json
 
+      - name: Rebuild dashboard from stored results
+        # The nightly run already wrote dashboard/index.html; rebuilding here from the
+        # database (not from memory) proves the page shows what is actually stored.
+        if: always()
+        run: uv run python -m scripts.dashboard --out dashboard
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: nightly-live-report
           path: nightly-live.json
+
+      - uses: actions/upload-pages-artifact@v3
+        if: always()
+        with:
+          path: dashboard
+
+  pages:
+    # Publish the dashboard: every live run updates the Pages site automatically.
+    # First-time setup (once): Settings -> Pages -> Source: GitHub Actions.
+    needs: live
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

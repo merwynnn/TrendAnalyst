@@ -174,6 +174,9 @@ DEFAULT_BUDGETS: Final[dict[str, GateBudget]] = {
     "judge": GateBudget(gate="judge", calls_per_day=25, tokens_per_day=400_000),
     "writer": GateBudget(gate="writer", calls_per_day=40, tokens_per_day=600_000),
     "extractor": GateBudget(gate="extractor", calls_per_day=200, tokens_per_day=1_000_000),
+    #: One call per run assesses every niche at once (and the cache makes re-runs free),
+    #: so the cap is a backstop against a retry loop, not a ration.
+    "pain": GateBudget(gate="pain", calls_per_day=8, tokens_per_day=120_000),
 }
 
 

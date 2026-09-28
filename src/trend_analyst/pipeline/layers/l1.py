@@ -76,8 +76,13 @@ class MinedPhrase:
     velocity_percentile: float = 0.0
     #: Daily mention series over the mining window, oldest first (for the scorer's features).
     series: tuple[float, ...] = ()
-    #: Populated by `rank_products` for everything that survived the prune.
+    #: Populated by `rank_products` for everything that survived the prune. Everything
+    #: mined is still scored and stored — `kept` only marks the velocity shortlist the
+    #: judge reads first, so a dropped idea keeps its evidence and its reason.
     kept: bool = False
+    #: Why this phrase missed the shortlist ("" when kept). Read by the dashboard, which
+    #: shows every idea found with why it did or did not advance.
+    drop_reason: str = ""
     #: Distinct documents the product appeared in. The single-document share is the honest
     #: measure of how much of a night's output rests on one post.
     documents: int = 0
@@ -92,6 +97,7 @@ class MinedPhrase:
             "ewma_z": round(self.ewma_zscore, 4),
             "velocity_percentile": round(self.velocity_percentile, 2),
             "kept": self.kept,
+            "drop_reason": self.drop_reason,
         }
 
 
@@ -120,6 +126,10 @@ class MiningReport:
     single_document: int = 0
     by_category: dict[str, int] = field(default_factory=dict)
     phrases: tuple[MinedPhrase, ...] = ()
+    #: Every idea that did not make the velocity shortlist, with its reason. Capped:
+    #: the run's layer_status is JSONB, not an archive — the count is exact, the list
+    #: keeps the first few hundred.
+    dropped: tuple[dict[str, str], ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -140,6 +150,7 @@ class MiningReport:
             "min_keep": self.min_keep,
             "single_document": self.single_document,
             "by_category": dict(sorted(self.by_category.items())),
+            "dropped": list(self.dropped),
         }
 
     def summary(self) -> str:
@@ -161,13 +172,19 @@ class MiningReport:
 
 @dataclass(frozen=True, slots=True)
 class RankedProducts:
-    """The ranking outcome: kept phrases plus the evidence map scoring needs."""
+    """The ranking outcome: every mined phrase plus the evidence map scoring needs."""
 
     kept: tuple[MinedPhrase, ...]
+    #: Every non-stale mined phrase, shortlist flags and drop reasons set. Scoring and
+    #: storage read this — nothing mined is thrown away, so the dashboard can list ALL
+    #: ideas found with why each did or did not advance.
+    all: tuple[MinedPhrase, ...] = ()
     #: Phrase -> the lake points behind it, so scoring never re-matches text.
-    match_points: dict[str, list[SignalPoint]]
-    stale: int
-    mined: int
+    match_points: dict[str, list[SignalPoint]] = field(default_factory=dict)
+    stale: int = 0
+    mined: int = 0
+    #: (phrase, category) pairs whose last mention predates the staleness horizon.
+    stale_phrases: tuple[tuple[str, str], ...] = ()
 
 
 def rank_products(
@@ -202,6 +219,7 @@ def rank_products(
     # night merges its evidence rather than splitting it.
     match_points: dict[str, list[SignalPoint]] = {}
     stale = 0
+    stale_phrases: list[tuple[str, str]] = []
     for phrase, category_id, point_ids in resolved:
         if (category_id, phrase) in own_points:
             continue
@@ -213,6 +231,7 @@ def rank_products(
         last_seen = max(point.ts for point in points)
         if last_seen < cutoff:
             stale += 1
+            stale_phrases.append((phrase, category_id))
             continue
         own_points[(category_id, phrase)] = points
         match_points.setdefault(phrase, []).extend(points)
@@ -267,10 +286,33 @@ def rank_products(
             mined.phrase,
         ),
     )
-    kept = [replace(mined, kept=True) for mined in ordered[:target]]
+    # The shortlist is a prioritization, not a deletion: everything mined is scored,
+    # stored and shown. Below-cutoff phrases carry the reason they missed it (rank and
+    # velocity percentile), so the dashboard can say why each idea did not advance.
+    shortlist = {id(mined) for mined in ordered[:target]}
+    total = len(everything)
+    all_phrases = tuple(
+        replace(
+            mined,
+            kept=id(mined) in shortlist,
+            drop_reason=(
+                ""
+                if id(mined) in shortlist
+                else (
+                    f"below the velocity shortlist "
+                    f"(rank {rank} of {total}, "
+                    f"velocity percentile {mined.velocity_percentile:.0f})"
+                )
+            ),
+        )
+        for rank, mined in enumerate(ordered, start=1)
+    )
+    kept = [mined for mined in all_phrases if mined.kept]
     return RankedProducts(
         kept=tuple(kept),
-        match_points={candidate.phrase: match_points[candidate.phrase] for candidate in kept},
+        all=all_phrases,
+        match_points={phrase: match_points[phrase] for phrase in match_points},
         stale=stale,
         mined=len(everything),
+        stale_phrases=tuple(stale_phrases),
     )

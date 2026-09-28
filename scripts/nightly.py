@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from config.categories import TaxonomyError, default_taxonomy
 from config.settings import ConfigError, default_config_dir, load_settings
+from scripts.dashboard import build_dashboard
 from trend_analyst.llm.extract import heuristic_sender
 from trend_analyst.llm.gates import judge_candidates, pending_judgements
 from trend_analyst.llm.providers import settings_sender
@@ -242,6 +243,16 @@ def run_nightly(
         else:
             report.ttl_summary = "skipped"
     _say(f"TTL: {report.ttl_summary}")
+
+    # --- dashboard ------------------------------------------------------------
+    # Presentational, so a rendering failure notes rather than fails the run: failing
+    # a 15-minute live run on HTML would be the tail wagging the pipeline.
+    try:
+        dashboard_path = build_dashboard(sessions, out_dir=Path("dashboard"), as_of=as_of)
+    except Exception as exc:
+        report.notes.append(f"dashboard failed: {exc}")
+    else:
+        _say(f"dashboard: {dashboard_path}")
     _say(
         f"nightly done — L0 {report.l0_status}, decide {report.decide_status} "
         f"({report.candidates_scored} scored), L2 {report.l2_status}, "

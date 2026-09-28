@@ -34,6 +34,8 @@ htmlcov/
 logs/
 outbox/
 *.log
+# Generated dashboard (rebuilt every run, published to Pages by the live workflow).
+dashboard/
 
 # ---------------------------------------------------------------------------
 # OS / editor

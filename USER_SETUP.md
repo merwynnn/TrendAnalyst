@@ -154,8 +154,15 @@ with `NIGHTLY: FAIL`, or any layer reads `failed`, jump to §6.
    `NEON_DSN` (the direct host, not `-pooler`), `GEMINI_API_KEY`, and optionally
    `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `SEARCHAPI_KEY`, `PRODUCTHUNT_CLIENT_ID`,
    `PRODUCTHUNT_CLIENT_SECRET`. The run defaults to `--dry-run` (full progress output,
-   no writes, no spend) — untick it for the real thing, and watch it stream per-source,
-   per-chunk, per-batch lines into the run log.
+    no writes, no spend) — untick it for the real thing, and watch it stream per-source,
+    per-chunk, per-batch lines into the run log.
+
+**The dashboard.** Every run (local or live) rewrites `dashboard/index.html`: niches
+ranked by niche score (0.4 LLM-judged pain + 0.3 measured passion + 0.3 momentum),
+every idea listed with its MGS, expandable rows for evidence and why each idea did or
+did not advance, and a "didn't make the cut" list per niche. The live workflow also
+publishes it to GitHub Pages — one-time setup: repo Settings → Pages → Source:
+**GitHub Actions**. After that, each live run updates the site automatically.
 
 **Cost at expected volume (one nightly run: 15 Tier-S sources, ≤60 judged candidates, ≤5 briefs).**
 

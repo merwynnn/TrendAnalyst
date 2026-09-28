@@ -28,6 +28,8 @@ __all__ = [
     "GateSchemaError",
     "JudgeBatch",
     "JudgeVerdict",
+    "NichePain",
+    "NichePainBatch",
     "PlannerPlan",
     "Quote",
     "ValidationOutcome",
@@ -39,8 +41,8 @@ __all__ = [
 #: A fenced block needs three parts when split on the fence marker.
 _FENCE_PARTS: Final = 2
 
-#: The gates, matching `llm_cache.gate`'s CHECK constraint (migration 0004).
-GateName = Literal["planner", "judge", "writer", "extractor"]
+#: The gates, matching `llm_cache.gate`'s CHECK constraint (migration 0006).
+GateName = Literal["planner", "judge", "writer", "extractor", "pain"]
 
 Decision = Literal["keep", "drop"]
 FadLabel = Literal["fad", "trend", "evergreen"]
@@ -147,6 +149,44 @@ class ExtractorOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     products: list[ExtractedProduct] = Field(default_factory=list)
+
+
+class NichePain(BaseModel):
+    """One niche's pain assessment: the model decides what is painful, not a keyword list.
+
+    A painful problem is something quite problematic for people — it costs them time,
+    money, health or peace of mind, it recurs, and workarounds exist. The score says
+    how painful the niche's core problem is (0 = enthusiasm with no problem in sight,
+    100 = people actively suffering and paying to stop it), grounded in the evidence
+    lines the prompt carried.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    category: str = Field(min_length=1, max_length=64)
+    pain_score: float = Field(ge=0.0, le=100.0, default=0.0)
+    #: The core painful problem in one line ("renters ruining deposits with drill holes").
+    painful_problem: str = Field(default="", max_length=200)
+    #: 1-2 sentences tying the score to the evidence. Shown on the dashboard.
+    rationale: str = Field(default="", max_length=600)
+    representative_phrases: list[str] = Field(default_factory=list)
+
+    @field_validator("representative_phrases")
+    @classmethod
+    def _sane_phrases(cls, value: list[str]) -> list[str]:
+        cleaned = [item.strip()[:200] for item in value if item.strip()]
+        return cleaned[:5]
+
+
+class NichePainBatch(BaseModel):
+    """A night's niche pain assessments in a single call — one niche per category."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    niches: list[NichePain] = Field(default_factory=list)
+
+    def by_category(self) -> dict[str, NichePain]:
+        return {niche.category: niche for niche in self.niches}
 
 
 class PlannerPlan(BaseModel):

@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Final
 
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -25,6 +25,7 @@ from trend_analyst.llm.extract import (
     heuristic_sender,
 )
 from trend_analyst.llm.gateway import GateBudget, ProviderSpec, Sender
+from trend_analyst.llm.pain import PainReport, assess_niches, niche_evidence_for
 from trend_analyst.pipeline.layers.l1 import (
     DEFAULT_CHUNK_EXCLUDED_SOURCES,
     DEFAULT_MAX_AGE_DAYS,
@@ -54,6 +55,10 @@ from trend_analyst.store.snapshots import (
 )
 
 __all__ = ["DecideReport", "run_decide"]
+
+#: Cap on the per-idea drop reasons stored in the run's layer_status: the count is
+#: exact, the list keeps the first few hundred. layer_status is JSONB, not an archive.
+_MAX_DROPPED_STORED: Final = 300
 
 
 @dataclass(slots=True)
@@ -241,7 +246,7 @@ def run_decide(
                 else "live provider"
             )
             progress(f"L1 decide: {len(points)} lake points -> {len(chunks)} chunk(s), {kind}")
-        scoring, mining_note, status = _extract_and_rank(
+        scoring, mining_note, status, pain = _extract_and_rank(
             session,
             sessions,
             points=points,
@@ -268,7 +273,8 @@ def run_decide(
         if progress is not None:
             progress(f"L1/L3 decide: scored {scoring.scored} candidate(s), status {status}")
         ledger_note = (
-            f"{mining_note} | {scoring.summary()} | weights {weights.version}"
+            f"{mining_note} | {scoring.summary()} | {pain.summary()} | "
+            f"weights {weights.version}"
             + (" | DRY RUN: nothing written" if dry_run else "")
         )
 
@@ -294,7 +300,8 @@ def run_decide(
         digest = "" if dry_run else snapshot_hash(session, run_id)
         status = "ok" if scoring.scored else "empty"
         ledger_note = (
-            f"{mining.summary()} | {scoring.summary()} | weights {weights.version}"
+            f"{mining.summary()} | {scoring.summary()} | {pain.summary()} | "
+            f"weights {weights.version}"
             + (" | DRY RUN: nothing written" if dry_run else "")
         )
         if dry_run:
@@ -309,6 +316,7 @@ def run_decide(
                 layer_status={
                     "L1": {"status": "ok", **mining.as_dict()},
                     "L3": {"status": status, **scoring.as_dict()},
+                    "pain": pain.as_dict(),
                 },
                 notes=f"{ledger_note} | DRY RUN closed as aborted: no scores, no snapshots",
             )
@@ -321,6 +329,7 @@ def run_decide(
                 layer_status={
                     "L1": {"status": "ok", **mining.as_dict()},
                     "L3": {"status": status, **scoring.as_dict()},
+                    "pain": pain.as_dict(),
                 },
                 notes=ledger_note,
             )
@@ -343,6 +352,48 @@ def run_decide(
             top=ranked[:top],
             notes=(ledger_note,),
         )
+
+
+def _assess_run_pain(
+    session: Session,
+    *,
+    scoring: L3Report,
+    ranked_all: Sequence[Any],
+    sender: Sender | None,
+    heuristic: bool,
+    dry_run: bool,
+    bypass_cache: bool,
+    progress: Callable[[str], None] | None,
+) -> PainReport:
+    """Assess every scored niche's pain, once per run, or explain why not.
+
+    The heuristic stand-in cannot judge pain (its answers are plumbing, never model
+    output), so offline runs skip with a reason rather than spending a call on a stub
+    whose verdict would be meaningless.
+    """
+    if not scoring.candidates:
+        return PainReport(status="empty", reason="nothing was scored, so no niche was assessed")
+    if sender is None or heuristic:
+        return PainReport(
+            status="skipped",
+            reason="no live gate transport: pain needs a model judgement, not the stand-in",
+        )
+    texts_by_phrase = {item.phrase: item.texts for item in ranked_all}
+    by_category: dict[str, list[ScoredCandidate]] = {}
+    for candidate in scoring.candidates:
+        by_category.setdefault(candidate.category_id, []).append(candidate)
+    evidence = [
+        niche_evidence_for(category, items, texts_by_phrase)
+        for category, items in sorted(by_category.items())
+    ]
+    return assess_niches(
+        session,
+        evidence,
+        sender=sender,
+        dry_run=dry_run,
+        bypass_cache=bypass_cache,
+        progress=progress,
+    )
 
 
 def _extract_and_rank(
@@ -369,15 +420,17 @@ def _extract_and_rank(
     dry_run: bool,
     progress: Callable[[str], None] | None,
     max_workers: int,
-) -> tuple[L3Report, str, str]:
-    """Run the Extractor gate, rank what it found, score the survivors.
+) -> tuple[L3Report, str, str, PainReport]:
+    """Run the Extractor gate, rank what it found, score everything, assess pain.
 
-    Returns (scoring report, mining note, status). Without a sender — and outside a dry
-    run — there is nothing to score: extraction is skipped with a reason, loudly.
+    Returns (scoring report, mining note, status, pain report). Without a sender — and
+    outside a dry run — there is nothing to score: extraction is skipped with a reason,
+    loudly. Everything mined is scored and stored (the shortlist only prioritizes what
+    the judge reads first); the pain assessment runs once per run over the niches.
     """
     if sender is None and not dry_run:
         note = f"{mining.summary()} | no gate transport available, so nothing was extracted"
-        return L3Report(), note, "empty"
+        return L3Report(), note, "empty", PainReport(status="skipped", reason="no extraction ran")
     # Without a real sender only dry runs arrive here, and the stand-in is free and
     # deterministic — so a dry run still resolves, ranks and scores, while a dry run
     # with a real sender calls nobody. The stand-in's answers are never cached: a live
@@ -406,7 +459,12 @@ def _extract_and_rank(
     mining.unknown_refs = extraction.unknown_refs
     mining.empty_chunks = extraction.empty_chunks
     if extraction.status == "dry-run":
-        return L3Report(), f"{mining.summary()} | DRY RUN: nothing written", "empty"
+        return (
+            L3Report(),
+            f"{mining.summary()} | DRY RUN: nothing written",
+            "empty",
+            PainReport(status="skipped", reason="dry run: nothing was assessed"),
+        )
     ranked = rank_products(
         [(item.phrase, item.category, item.point_ids) for item in extraction.products],
         points_by_id,
@@ -421,22 +479,52 @@ def _extract_and_rank(
     mining.kept = len(ranked.kept)
     mining.stale = ranked.stale
     mining.single_document = sum(
-        1 for item in ranked.kept if item.documents < MIN_DOCUMENTS_FOR_NEWS
+        1 for item in ranked.all if item.documents < MIN_DOCUMENTS_FOR_NEWS
     )
     mining.by_category = {
         item.category_id: sum(
-            1 for other in ranked.kept if other.category_id == item.category_id
+            1 for other in ranked.all if other.category_id == item.category_id
         )
-        for item in ranked.kept
+        for item in ranked.all
     }
-    mining.phrases = ranked.kept
+    # Everything mined is scored and stored — the shortlist only decides what the judge
+    # reads first. Each idea below it keeps its reason; stale ones went quiet.
+    dropped = [
+        {
+            "phrase": item.phrase,
+            "category": item.category_id,
+            "reason": item.drop_reason,
+        }
+        for item in ranked.all
+        if not item.kept
+    ]
+    dropped.extend(
+        {
+            "phrase": phrase,
+            "category": category_id,
+            "reason": f"stale: last mention older than {max_age_days} days",
+        }
+        for phrase, category_id in ranked.stale_phrases
+    )
+    mining.dropped = tuple(dropped[:_MAX_DROPPED_STORED])
+    mining.phrases = ranked.all
     scoring = score_phrases(
-        ranked.kept,
+        ranked.all,
         points,
         taxonomy=taxonomy,
         as_of=as_of,
         weights=weights,
         match_points=ranked.match_points,
+    )
+    pain = _assess_run_pain(
+        session,
+        scoring=scoring,
+        ranked_all=ranked.all,
+        sender=sender,
+        heuristic=heuristic,
+        dry_run=dry_run,
+        bypass_cache=bypass_cache,
+        progress=progress,
     )
     if extraction.status in {"partial", "degraded"}:
         note = f"{mining.summary()} | {extraction.reason}"
@@ -444,7 +532,7 @@ def _extract_and_rank(
         note = mining.summary()
     if heuristic:
         note += " | heuristic extraction stand-in (offline plumbing, not a model judgement)"
-    return scoring, note, ("ok" if scoring.scored else "empty")
+    return scoring, note, ("ok" if scoring.scored else "empty"), pain
 
 
 def read_ranked(session: Session, *, limit: int = 25) -> list[RankedScore]:
