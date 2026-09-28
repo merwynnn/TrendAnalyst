@@ -67,9 +67,14 @@ __all__ = [
 #: catalogue, not a promise. A mock would have accepted every one of the wrong names, which is
 #: exactly why the brief asks for one live run.
 DEFAULT_CHAIN: Final[tuple[tuple[str, str], ...]] = (
+    # Lite leads: gemini-3.5-flash-lite allows 15 RPM on the free tier — far more than
+    # the full models — and the gates (judge, writer, pain) are simple JSON tasks it
+    # answers well (proven live: it carried the drill after the bigger models 429d).
+    # The stronger models sit behind it for failover, not ahead of it for quality.
+    ("gemini", "gemini-3.5-flash-lite"),
     ("gemini", "gemini-flash-latest"),
     # One model per provider is a single point of failure, and Gemini's free tier is rate-limited
-    # PER MODEL — so the chain spreads across the model family newest-first, and a 503/429 on one
+    # PER MODEL — so the chain spreads across the model family, and a 503/429 on one
     # id fails over to the next id with its own quota bucket. Live evidence for every entry:
     # the 2026-09-21 model probe answered 200 for flash-latest, 3.6-flash, 3.5-flash and
     # 3.5-flash-lite, while 3.8-flash and 3.7-flash answered 503 "high demand" (real ids,
@@ -80,11 +85,6 @@ DEFAULT_CHAIN: Final[tuple[tuple[str, str], ...]] = (
     ("gemini", "gemini-3.7-flash"),
     ("gemini", "gemini-3.6-flash"),
     ("gemini", "gemini-3.5-flash"),
-    # The high-rate-limit workhorse: "flash-lite" tiers allow far more requests per day than the
-    # full models, which matters because the free tier is the binding constraint on a nightly run
-    # (LESSONS §6.5: a day of drilling exhausted the quota). It sits after the stronger models so
-    # quality comes first and rate limits are what it rescues, not what it is chosen for.
-    ("gemini", "gemini-3.5-flash-lite"),
     # Groq retired `llama-3.3-70b-versatile`: the live probe answered
     # `404 model_not_found` with a valid key, and `GET /openai/v1/models` listed
     # gpt-oss-120b among 13 available models. Picking the same model Cerebras serves keeps the

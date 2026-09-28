@@ -451,9 +451,10 @@ def extract_products(
         dispatch_pause_s: seconds between chunk dispatches. Free-tier limits are
             per-minute as well as per-day, and four workers bursting at ~15k-token
             prompts 429 even a model with daily headroom (a night once lost 46 of 48
-            chunks this way). A pause bounds the dispatch rate — with 10s calls and a
-            4s pause, ~3 calls overlap and dispatches stay near 15/min — while slow
-            calls still overlap, so it paces without serializing.
+            chunks this way). A pause bounds the dispatch rate — with 10s calls and
+            the 5s default, ~3 calls overlap and dispatches stay near 12/min, under
+            flash-lite's 15 RPM — while slow calls still overlap, so it paces
+            without serializing.
     """
     report = ExtractReport(chunks=len(chunks))
     if not chunks:
