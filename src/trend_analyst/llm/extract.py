@@ -26,7 +26,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final
 
@@ -167,10 +167,21 @@ class ExtractReport:
     #: `ok` with fewer attempts than chunks and no reason — silent evidence loss, the
     #: worst outcome this gate can produce. Whatever the cause, it is now loud.
     attempted: int = 0
+    #: Why chunks failed, reason -> count. A night that loses 46 of 48 chunks to 429s
+    #: once reported only "46 failed" — the count without the cause, which is how a
+    #: quota outage reads as a pipeline bug. Truncated: counting, not archiving.
+    fail_reasons: dict[str, int] = field(default_factory=dict)
 
     @property
     def kept(self) -> int:
         return len(self.products)
+
+    @property
+    def top_fail_reason(self) -> str:
+        """The most common chunk failure reason, "" when nothing failed."""
+        if not self.fail_reasons:
+            return ""
+        return max(self.fail_reasons.items(), key=lambda item: (item[1], item[0]))[0]
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -181,6 +192,7 @@ class ExtractReport:
             "calls": self.calls,
             "cached": self.cached,
             "failed_chunks": self.failed_chunks,
+            "top_fail_reason": self.top_fail_reason,
             "empty_chunks": self.empty_chunks,
             "products_raw": self.products_raw,
             "products_kept": self.kept,
@@ -195,9 +207,12 @@ class ExtractReport:
             if self.attempted != self.chunks
             else f"{self.chunks} chunk(s)"
         )
+        failed = f"{self.failed_chunks} failed"
+        if self.failed_chunks and self.top_fail_reason:
+            failed += f" (top reason: {self.top_fail_reason[:160]})"
         return (
             f"L1 extract: {self.kept} product(s) from {coverage} "
-            f"({self.calls} call(s), {self.cached} cached, {self.failed_chunks} failed, "
+            f"({self.calls} call(s), {self.cached} cached, {failed}, "
             f"{self.unknown_refs} invented ref(s) dropped)"
         )
 
@@ -548,6 +563,8 @@ def _record_outcome(
         return "stop"
     if not outcome.ok or not isinstance(outcome.value, ExtractorOutput):
         report.failed_chunks += 1
+        reason = (outcome.reason or "unknown").strip()[:160] or "unknown"
+        report.fail_reasons[reason] = report.fail_reasons.get(reason, 0) + 1
         if progress is not None:
             progress(f"L1 extract [{position}/{total}] failed: {outcome.reason[:120]}")
         return "continue"
@@ -631,6 +648,8 @@ def _extract_parallel(
                 outcome = future.result()
             except Exception as exc:  # a dead worker is a failed chunk, never a crash
                 report.failed_chunks += 1
+                reason = f"worker failed: {exc}".strip()[:160]
+                report.fail_reasons[reason] = report.fail_reasons.get(reason, 0) + 1
                 if progress is not None:
                     progress(f"L1 extract [{position}/{total}] worker failed: {exc}"[:160])
                 continue

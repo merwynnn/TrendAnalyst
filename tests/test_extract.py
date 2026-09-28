@@ -274,6 +274,27 @@ def test_a_failed_chunk_is_a_gap_not_a_crash(
 
 
 @pytest.mark.db
+def test_failed_chunks_carry_their_cause(
+    sessions: sessionmaker[Session],
+) -> None:
+    """A night that loses chunks to 429s must say 429s, not just a count."""
+    def failing(_provider: ProviderSpec, _prompt: str) -> tuple[str, int, int]:
+        raise RuntimeError("HTTP 429: quota exhausted")
+
+    chunks, _ = build_chunks(texts(65), chunk_size=30)
+    with sessions() as session:
+        report = extract_products(
+            session, chunks, sender=failing,
+        )
+    assert report.failed_chunks == 3
+    assert report.fail_reasons
+    assert sum(report.fail_reasons.values()) == 3
+    assert "429" in report.top_fail_reason
+    assert "429" in report.summary()
+    assert report.as_dict()["top_fail_reason"] == report.top_fail_reason
+
+
+@pytest.mark.db
 def test_replay_is_deterministic_through_the_cache(
     sessions: sessionmaker[Session],
 ) -> None:

@@ -478,6 +478,7 @@ def _extract_and_rank(
     mining.pruned = ranked.mined - len(ranked.kept)
     mining.kept = len(ranked.kept)
     mining.stale = ranked.stale
+    mining.failed_reason = extraction.top_fail_reason
     mining.single_document = sum(
         1 for item in ranked.all if item.documents < MIN_DOCUMENTS_FOR_NEWS
     )

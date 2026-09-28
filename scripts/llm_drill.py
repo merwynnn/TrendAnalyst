@@ -15,7 +15,8 @@ It runs six probes, in this order, and each one must pass:
    degrade with a reason). Probe 2 alone cannot prove this: the chain usually answers from another
    model of the same provider.
 3. **Cache.** The identical prompt again must be served from the cache and reach no provider.
-4. **Accounting.** The token log and the quota ledger must both show the spend, per gate.
+4. **Accounting.** The token log must show the spend, per gate (the quota ledger was
+   dropped in migration 0003; per-gate visibility comes from the `llm_cache` rows).
 5. **Grounding.** A verdict citing a URL the pipeline never collected must come back with that
    quote stripped and `ungrounded` set — the code-enforced rule, checked against a live answer.
 
@@ -34,8 +35,6 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
-
 from config.settings import ConfigError, default_config_dir, load_settings
 from trend_analyst.llm.cache import token_spend_by_gate
 from trend_analyst.llm.gateway import (
@@ -51,7 +50,6 @@ from trend_analyst.store.db import (
     create_db_engine,
     create_session_factory,
 )
-from trend_analyst.store.models import QuotaLedger
 
 __all__ = ["main", "run_drill"]
 
@@ -117,7 +115,8 @@ def run_drill(  # noqa: PLR0915 - five probes read better as one sequence than a
     silently interfered through the cache: a previous drill's probe-2 call had warmed that key, so
     the next run's failover probe was answered from the cache without contacting anything — a
     green-looking probe that measured nothing. The cache probe is the exception: it deliberately
-    reuses probe 1's exact payload, because proving a cache hit requires a warm entry.
+    reuses probe 2's exact prompt and payload, because proving a cache hit requires a warm entry —
+    and "exact" means exact, since the payload is part of the cache key.
     """
     budget = DEFAULT_BUDGETS["judge"]
     stamp = nonce or uuid.uuid4().hex[:12]
@@ -322,12 +321,15 @@ def run_drill(  # noqa: PLR0915 - five probes read better as one sequence than a
         probe_three = call_gate(
             session,
             gate="judge",
-            prompt=prompt + "\n(probe 2: failover)",  # identical to probe 2's prompt
+            # Byte-identical to probe 2's call: same prompt, same payload (the payload
+            # carries the nonce and is part of the cache key — a "nearly identical"
+            # repeat is a guaranteed miss, which is exactly the failure this probe had).
+            prompt=render_prompt(probe_two_payload, INSTRUCTIONS),
             schema=JudgeVerdict,
             sender=counting,
             chain=failover_chain,
             budget=budget,
-            payload={**CANDIDATE, "probe": 2},
+            payload=probe_two_payload,
             evidence_urls=EVIDENCE_URLS,
         )
         session.commit()
@@ -345,11 +347,8 @@ def run_drill(  # noqa: PLR0915 - five probes read better as one sequence than a
     # --- 4. accounting --------------------------------------------------------
     with sessions() as session:
         spend = token_spend_by_gate(session)
-        ledger = session.execute(
-            select(QuotaLedger).where(QuotaLedger.source_id.like("llm_%"))
-        ).scalars().all()
         judge_spend = spend.get("judge", {})
-        ok = bool(judge_spend.get("total_tokens", 0) > 0 and ledger)
+        ok = bool(judge_spend.get("total_tokens", 0) > 0)
         passed &= ok
         lines.append(
             _line(
@@ -358,13 +357,9 @@ def run_drill(  # noqa: PLR0915 - five probes read better as one sequence than a
                 f"token log: judge answers={judge_spend.get('answers', 0)} "
                 f"tokens={judge_spend.get('total_tokens', 0)} "
                 f"(prompt={judge_spend.get('prompt_tokens', 0)}, "
-                f"completion={judge_spend.get('completion_tokens', 0)}); "
-                f"ledger rows={len(ledger)} "
-                f"amount={sum(int(row.amount) for row in ledger)}",
+                f"completion={judge_spend.get('completion_tokens', 0)})",
             )
         )
-        for row in ledger[:3]:
-            lines.append(f"      ledger: {row.operation} amount={row.amount} reason={row.reason}")
 
     # --- 5. grounding ---------------------------------------------------------
     invented = JudgeVerdict.model_validate(

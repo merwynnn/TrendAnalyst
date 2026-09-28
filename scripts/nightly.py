@@ -421,7 +421,10 @@ def _run_l2(
         )
         for source_id, reason in skipped.items():
             report.skipped_sources[source_id] = reason
+        # A run row left open reads as a run that never finished: close it on the live
+        # path too, not just on dry runs (live L2 rows used to linger as `running`).
         if not dry_run:
+            close_run(session, run_id, status=report.status, notes=report.summary())
             session.commit()
         else:
             close_run(session, run_id, status="aborted", notes="DRY RUN: L2 wrote nothing")

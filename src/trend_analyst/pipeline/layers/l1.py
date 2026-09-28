@@ -130,6 +130,10 @@ class MiningReport:
     #: the run's layer_status is JSONB, not an archive — the count is exact, the list
     #: keeps the first few hundred.
     dropped: tuple[dict[str, str], ...] = ()
+    #: The most common chunk failure reason this run ("", when nothing failed). Failed
+    #: chunks are evidence loss, and the count without the cause reads as a pipeline
+    #: bug when it is really a quota outage.
+    failed_reason: str = ""
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -151,6 +155,7 @@ class MiningReport:
             "single_document": self.single_document,
             "by_category": dict(sorted(self.by_category.items())),
             "dropped": list(self.dropped),
+            "failed_reason": self.failed_reason,
         }
 
     def summary(self) -> str:
@@ -160,10 +165,13 @@ class MiningReport:
             if self.attempted != self.chunks
             else f"{self.chunks} chunks"
         )
+        failed = f"{self.failed_chunks} failed"
+        if self.failed_chunks and self.failed_reason:
+            failed += f" (top: {self.failed_reason[:160]})"
         return (
             f"L1: {self.texts_scanned} texts ({self.duplicate_texts} duplicates skipped) "
             f"-> {coverage} "
-            f"({self.calls} calls, {self.cached} cached, {self.failed_chunks} failed) -> "
+            f"({self.calls} calls, {self.cached} cached, {failed}) -> "
             f"{self.mined} products ({self.unknown_refs} invented refs dropped, "
             f"stale {self.stale}), pruned {self.pruned}, "
             f"kept {self.kept} ({self.single_document} from a single document)"
