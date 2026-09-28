@@ -107,13 +107,23 @@ def build_dashboard(
 
 
 def _latest_nightly_run(session: Session) -> Run | None:
-    """The newest finished nightly run — the dashboard explains the latest results."""
-    return session.execute(
+    """The newest finished nightly run that actually decided something.
+
+    Each stage writes its own run row (L0, decide, L2, gates), so the newest nightly
+    row is often the judge/writer one — which carries no L1/pain data. The dashboard
+    explains the latest *results*, so it reads the newest row that has them, falling
+    back to the newest finished row when no stage has decided yet.
+    """
+    rows = session.execute(
         select(Run)
         .where(Run.trigger == "nightly", Run.status.in_(["ok", "degraded", "empty"]))
         .order_by(Run.started_at.desc())
-        .limit(1)
-    ).scalars().first()
+        .limit(10)
+    ).scalars().all()
+    for row in rows:
+        if (row.layer_status or {}).get("L1"):
+            return row
+    return rows[0] if rows else None
 
 
 def _as_of(session: Session) -> datetime:

@@ -270,6 +270,18 @@ def test_dashboard_renders_every_idea_with_its_why(
                 notes="test run",
             )
         )
+        # A newer stage row with no results (judge/writer rows carry none): the
+        # dashboard must still explain the latest run that decided something.
+        session.add(
+            Run(
+                status="ok",
+                trigger="nightly",
+                started_at=NOW + timedelta(hours=1),
+                finished_at=NOW + timedelta(hours=1),
+                layer_status={},
+                notes="later stage, no results",
+            )
+        )
         session.commit()
     target = build_dashboard(sessions, out_dir=tmp_path, as_of=NOW)
     page = target.read_text(encoding="utf-8")
