@@ -178,7 +178,6 @@ def run_decide(
     dry_run: bool = False,
     top: int = 10,
     progress: Callable[[str], None] | None = None,
-    max_workers: int = 1,
     dispatch_pause_s: float = 0.0,
 ) -> DecideReport:
     """Extract products from the lake window, score what survives, append the snapshots.
@@ -195,8 +194,6 @@ def run_decide(
             so a reader can see the prune was a decision, not an accident.
         dry_run: do everything and write nothing — including the candidates, so a dry run
             leaves the database exactly as it found it.
-        max_workers: parallel extractor calls (1 is sequential). Needs no extra setup:
-            worker sessions come from `sessions`.
         dispatch_pause_s: seconds between extractor dispatches (free-tier per-minute
             limits); 0 means burst.
     """
@@ -251,7 +248,6 @@ def run_decide(
             progress(f"L1 decide: {len(points)} lake points -> {len(chunks)} chunk(s), {kind}")
         scoring, mining_note, status, pain = _extract_and_rank(
             session,
-            sessions,
             points=points,
             points_by_id=points_by_id,
             chunks=chunks,
@@ -271,7 +267,6 @@ def run_decide(
             bypass_cache=bypass_cache,
             dry_run=dry_run,
             progress=progress,
-            max_workers=max_workers,
             dispatch_pause_s=dispatch_pause_s,
         )
         if progress is not None:
@@ -402,7 +397,6 @@ def _assess_run_pain(
 
 def _extract_and_rank(
     session: Session,
-    sessions: sessionmaker[Session],
     *,
     points: Sequence[SignalPoint],
     points_by_id: dict[int, SignalPoint],
@@ -423,7 +417,6 @@ def _extract_and_rank(
     bypass_cache: bool,
     dry_run: bool,
     progress: Callable[[str], None] | None,
-    max_workers: int,
     dispatch_pause_s: float = 0.0,
 ) -> tuple[L3Report, str, str, PainReport]:
     """Run the Extractor gate, rank what it found, score everything, assess pain.
@@ -453,8 +446,6 @@ def _extract_and_rank(
         dry_run=dry_run and not heuristic,
         bypass_cache=bypass_cache,
         write_cache=not heuristic and not dry_run,
-        max_workers=max_workers,
-        session_factory=sessions,
         dispatch_pause_s=dispatch_pause_s,
     )
     mining.chunks = extraction.chunks

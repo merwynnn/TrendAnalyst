@@ -9,12 +9,13 @@ The gate's contract, in test order:
 * cross-chunk products merge their refs instead of splitting the evidence;
 * caps are terminal (partial, named) and a failed chunk is a gap, not a crash;
 * the cache makes replay deterministic: the provider is called once per chunk, ever;
-* speed: big chunks, truncated texts, lite-first chain, parallel workers that merge
-  in submission order — a parallel run reports identically to a sequential one.
+* speed: big chunks, truncated texts, lite-first chain, one chunk after the next
+  with a dispatch pause — sequential by construction, polite by default.
 """
 
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -332,25 +333,6 @@ def test_consecutive_failures_stop_the_run_early(
 
 
 @pytest.mark.db
-def test_parallel_tripwire_stops_a_dead_chain(
-    sessions: sessionmaker[Session],
-) -> None:
-    """The submit loop watches completions: a dead chain stops the burst too."""
-    def failing(_provider: ProviderSpec, _prompt: str) -> tuple[str, int, int]:
-        raise RuntimeError("HTTP 429: quota exhausted")
-
-    chunks, _ = build_chunks(texts(200), chunk_size=30)
-    with sessions() as session:
-        report = extract_products(
-            session, chunks, sender=failing, max_workers=2,
-            session_factory=sessions, dispatch_pause_s=0.2,
-        )
-    assert report.attempted < len(chunks)  # the tail was never dispatched
-    assert report.status == "partial"
-    assert "consecutive" in report.reason
-
-
-@pytest.mark.db
 def test_replay_is_deterministic_through_the_cache(
     sessions: sessionmaker[Session],
 ) -> None:
@@ -405,37 +387,9 @@ def test_payload_truncates_exactly_like_the_prompt() -> None:
     assert stored in prompt
 
 
-@pytest.mark.db
-def test_parallel_matches_sequential(
-    sessions: sessionmaker[Session],
-) -> None:
-    """Workers change latency, never the outcome: merge order is submission order.
-
-    Cache counters are excluded from the comparison on purpose: both runs share the
-    test's transaction, so the second run legitimately sees the first run's flushed
-    cache rows. What must match is everything the merge decides.
-    """
-    chunks, _ = build_chunks(texts(65), chunk_size=30)
-    with sessions() as session:
-        sequential = extract_products(session, chunks, sender=fixed_sender(answer_json()))
-    with sessions() as session:
-        parallel = extract_products(
-            session, chunks, sender=fixed_sender(answer_json()),
-            max_workers=4, session_factory=sessions,
-        )
-    assert parallel.status == sequential.status == "ok"
-    assert [item.phrase for item in parallel.products] == [
-        item.phrase for item in sequential.products
-    ]
-    assert parallel.calls == sequential.calls
-    assert parallel.products_raw == sequential.products_raw
-    assert parallel.unknown_refs == sequential.unknown_refs
-
-
-@pytest.mark.db
-def test_parallel_needs_a_session_factory(
-    sessions: sessionmaker[Session],
-) -> None:
-    chunks, _ = build_chunks(texts(3), chunk_size=30)
-    with sessions() as session, pytest.raises(ValueError, match="session_factory"):
-        extract_products(session, chunks, sender=fixed_sender(answer_json()), max_workers=4)
+def test_extraction_is_sequential_by_construction() -> None:
+    """No parallel knob remains: one chunk after the next, on the caller's session."""
+    params = inspect.signature(extract_products).parameters
+    assert "max_workers" not in params
+    assert "session_factory" not in params
+    assert "dispatch_pause_s" in params  # pacing is how sequential stays polite

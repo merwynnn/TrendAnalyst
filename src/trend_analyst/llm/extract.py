@@ -23,9 +23,7 @@ Three rules keep the gate honest, and each mirrors a Judge-gate lesson:
 
 from __future__ import annotations
 
-import concurrent.futures
 import json
-import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -440,11 +438,14 @@ def extract_products(
     write_cache: bool = True,
     run_gate: Callable[..., GatewayOutcome] | None = None,
     progress: Callable[[str], None] | None = None,
-    max_workers: int = 1,
-    session_factory: Callable[[], Session] | None = None,
     dispatch_pause_s: float = 0.0,
 ) -> ExtractReport:
     """Extract products chunk by chunk, grounding every ref in code.
+
+    Strictly sequential, one chunk after the next, on the caller's session: parallel
+    calls once bought latency and paid for it in burst bans, idle-transaction
+    timeouts and half the complexity in this file. Sequential with a dispatch pause
+    stays under per-minute limits by construction.
 
     Args:
         sender: the provider transport (injected; tests pass a stub, production the real one).
@@ -453,20 +454,8 @@ def extract_products(
         write_cache: skip cache writes (the heuristic stand-in always passes False: its
             answers must never be cached as model output).
         progress: called with one line per chunk (index, provider, cached/live, yield).
-        max_workers: parallel provider calls. 1 is strictly sequential; higher values
-            run chunks concurrently for latency (the workload is network-bound). Merge
-            order is always submission order, so parallel runs report identically to
-            sequential ones. Sessions are never shared: each worker opens its own via
-            `session_factory`, which is required when max_workers > 1. Caps are checked
-            before each dispatch, so in-flight calls can overshoot them by at most the
-            worker count — bounded and stated, not silent.
-        dispatch_pause_s: seconds between chunk dispatches. Free-tier limits are
-            per-minute as well as per-day, and four workers bursting at ~15k-token
-            prompts 429 even a model with daily headroom (a night once lost 46 of 48
-            chunks this way). A pause bounds the dispatch rate — with 10s calls and
-            the 5s default, ~3 calls overlap and dispatches stay near 12/min, under
-            flash-lite's 15 RPM — while slow calls still overlap, so it paces
-            without serializing.
+        dispatch_pause_s: seconds between chunk dispatches (free-tier limits are
+            per-minute: the 5s default stays near 12/min, under flash-lite's 15 RPM).
     """
     report = ExtractReport(chunks=len(chunks))
     if not chunks:
@@ -477,8 +466,6 @@ def extract_products(
         report.status = "dry-run"
         report.reason = "dry run: the provider was not called"
         return report
-    if max_workers > 1 and session_factory is None:
-        raise ValueError("parallel extraction needs a session_factory (sessions are per worker)")
 
     limits = budget or DEFAULT_BUDGETS["extractor"]
     providers = tuple(chain) if chain is not None else default_extractor_chain()
@@ -486,26 +473,17 @@ def extract_products(
     total = len(chunks)
     resolved_batches: list[list[ResolvedProduct]] = []
 
-    if max_workers > 1:
-        _extract_parallel(
-            report, chunks, resolved_batches,
-            gate=gate, session_factory=session_factory, sender=sender, providers=providers,
-            limits=limits, calls_spent=calls_spent, tokens_spent=tokens_spent, now=now,
-            bypass_cache=bypass_cache, write_cache=write_cache, progress=progress,
-            max_workers=max_workers, dispatch_pause_s=dispatch_pause_s,
-        )
-    else:
-        for position, chunk in enumerate(chunks, start=1):
-            if position > 1 and dispatch_pause_s > 0:
-                time.sleep(dispatch_pause_s)
-            if _apply_chunk(
-                report, chunk, resolved_batches, position=position, total=total,
-                gate=gate, session=session, sender=sender, providers=providers,
-                limits=limits, calls_spent=calls_spent, tokens_spent=tokens_spent,
-                now=now, bypass_cache=bypass_cache, write_cache=write_cache,
-                progress=progress,
-            ) == "stop":
-                break
+    for position, chunk in enumerate(chunks, start=1):
+        if position > 1 and dispatch_pause_s > 0:
+            time.sleep(dispatch_pause_s)
+        if _apply_chunk(
+            report, chunk, resolved_batches, position=position, total=total,
+            gate=gate, session=session, sender=sender, providers=providers,
+            limits=limits, calls_spent=calls_spent, tokens_spent=tokens_spent,
+            now=now, bypass_cache=bypass_cache, write_cache=write_cache,
+            progress=progress,
+        ) == "stop":
+            break
 
     report.products = tuple(union_products(resolved_batches))
     if report.status == "ok" and report.attempted < len(chunks):
@@ -635,167 +613,3 @@ def _record_outcome(
             f"{len(resolved)} product(s), {invented} invented ref(s) dropped"
         )
     return "continue"
-
-
-def _extract_parallel(
-    report: ExtractReport,
-    chunks: Sequence[Sequence[ChunkText]],
-    resolved_batches: list[list[ResolvedProduct]],
-    *,
-    gate: Callable[..., GatewayOutcome],
-    session_factory: Callable[[], Session] | None,
-    sender: Sender,
-    providers: tuple[ProviderSpec, ...],
-    limits: GateBudget,
-    calls_spent: int,
-    tokens_spent: int,
-    now: datetime | None,
-    bypass_cache: bool,
-    write_cache: bool,
-    progress: Callable[[str], None] | None,
-    max_workers: int,
-    dispatch_pause_s: float = 0.0,
-) -> None:
-    """Run chunks concurrently, merging strictly in submission order.
-
-    Sessions are never shared: each worker opens its own session, commits its cache
-    writes, and closes it — a worker that dies mid-call rolls back and reports the
-    chunk failed. Caps are checked in the dispatch thread before each submit, so
-    in-flight calls can overshoot them by at most the worker count. Merge order is
-    submission order, so a parallel run reports identically to a sequential one.
-    """
-    assert session_factory is not None  # checked by the caller
-    total = len(chunks)
-    pending: list[tuple[int, concurrent.futures.Future[GatewayOutcome]]] = []
-    stopped = False
-    # Tripwire for a dead chain: worker threads must never touch the report (the merge
-    # loop owns all counting), so completions only flip a lock-guarded flag the dispatch
-    # loop reads. A few extra submits may slip through the race — accepted and stated:
-    # this is a backstop against burning quota, not accounting.
-    trip_lock = threading.Lock()
-    trip = {"streak": 0, "stopped": False}
-
-    def _watch(future: concurrent.futures.Future[GatewayOutcome]) -> None:
-        try:
-            outcome = future.result()
-        except Exception:
-            failed, capped = True, False
-        else:
-            failed = not outcome.ok or not isinstance(outcome.value, ExtractorOutput)
-            capped = outcome.capped
-        with trip_lock:
-            if capped:
-                trip["stopped"] = True
-            elif failed:
-                trip["streak"] += 1
-                if trip["streak"] >= _FAIL_STREAK_STOP:
-                    trip["stopped"] = True
-            else:
-                trip["streak"] = 0
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for position, chunk in enumerate(chunks, start=1):
-            with trip_lock:
-                tripped = trip["stopped"]
-            if stopped or tripped:
-                if tripped and report.status != "partial":
-                    report.status = "partial"
-                    report.reason = _streak_stop_reason(_FAIL_STREAK_STOP, "")
-                stopped = True
-                break
-            if position > 1 and dispatch_pause_s > 0:
-                time.sleep(dispatch_pause_s)
-            wall = _budget_wall(report, limits=limits, calls_spent=calls_spent,
-                                tokens_spent=tokens_spent)
-            if wall:
-                report.status = "partial"
-                report.reason = wall
-                stopped = True
-                break
-            report.attempted += 1
-            future = pool.submit(
-                _extract_one,
-                gate=gate, session_factory=session_factory, chunk=chunk,
-                sender=sender, providers=providers, limits=limits,
-                calls_spent=calls_spent, tokens_spent=tokens_spent, now=now,
-                bypass_cache=bypass_cache, write_cache=write_cache,
-            )
-            future.add_done_callback(_watch)
-            pending.append((position, future))
-        stopped = _fold_pending(
-            report, chunks, pending, resolved_batches,
-            total=total, progress=progress, stopped=stopped,
-        )
-
-
-def _fold_pending(
-    report: ExtractReport,
-    chunks: Sequence[Sequence[ChunkText]],
-    pending: list[tuple[int, concurrent.futures.Future[GatewayOutcome]]],
-    resolved_batches: list[list[ResolvedProduct]],
-    *,
-    total: int,
-    progress: Callable[[str], None] | None,
-    stopped: bool,
-) -> bool:
-    """Merge worker outcomes strictly in submission order. Returns the stop flag."""
-    for position, future in pending:
-        if stopped and report.status == "partial":
-            future.cancel()
-            continue
-        try:
-            outcome = future.result()
-        except Exception as exc:  # a dead worker is a failed chunk, never a crash
-            if progress is not None:
-                progress(f"L1 extract [{position}/{total}] worker failed: {exc}"[:160])
-            if _note_chunk_failure(report, f"worker failed: {exc}") == "stop":
-                stopped = True
-            continue
-        if _record_outcome(
-            report, chunks[position - 1], resolved_batches, outcome,
-            position=position, total=total, progress=progress,
-        ) == "stop":
-            stopped = True
-    return stopped
-
-
-def _extract_one(
-    *,
-    gate: Callable[..., GatewayOutcome],
-    session_factory: Callable[[], Session],
-    chunk: Sequence[ChunkText],
-    sender: Sender,
-    providers: tuple[ProviderSpec, ...],
-    limits: GateBudget,
-    calls_spent: int,
-    tokens_spent: int,
-    now: datetime | None,
-    bypass_cache: bool,
-    write_cache: bool,
-) -> GatewayOutcome:
-    """One chunk on one worker session: call, commit the cache write, close."""
-    session = session_factory()
-    try:
-        outcome = gate(
-            session,
-            gate="extractor",
-            prompt=chunk_prompt(chunk),
-            schema=ExtractorOutput,
-            sender=sender,
-            chain=providers,
-            budget=limits,
-            payload=chunk_payload(chunk),
-            cached_calls_today=calls_spent,
-            cached_tokens_today=tokens_spent,
-            run_id=None,
-            now=now,
-            bypass_cache=bypass_cache,
-            write_cache=write_cache,
-        )
-        session.commit()
-        return outcome
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()

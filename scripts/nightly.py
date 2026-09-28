@@ -152,10 +152,10 @@ def run_nightly(
     writer_sender: Any = None,
     run_ttl: bool = True,
     progress: Callable[[str], None] | None = None,
-    extractor_workers: int = 4,
     # 5s between dispatches ≈ 12/min: deliberately under flash-lite's 15 RPM free-tier
-    # limit, so the paced burst never meets the throttle in the first place.
-    extract_pause_s: float = 4.5,
+    # limit. Extraction is strictly sequential — one chunk after the next — so the
+    # paced stream never meets the throttle in the first place.
+    extract_pause_s: float = 5.0,
 ) -> NightlyReport:
     """Run every layer once, single-shot.
 
@@ -212,7 +212,6 @@ def run_nightly(
         dry_run=dry_run,
         top=top_k,
         progress=progress,
-        max_workers=extractor_workers,
         dispatch_pause_s=extract_pause_s,
     )
     report.decide_status = decide.status
@@ -506,10 +505,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="only the final report, no per-unit progress lines",
     )
     parser.add_argument(
-        "--extract-workers", type=int, default=4,
-        help="parallel extractor calls (1 is sequential; higher is faster to the caps)",
-    )
-    parser.add_argument(
         "--extract-pause", type=float, default=5.0,
         help="seconds between extractor dispatches (≈12/min at the 5s default: "
         "deliberately under flash-lite's 15 RPM free-tier limit)",
@@ -567,7 +562,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             writer_sender=writer_sender,
             run_ttl=not args.no_ttl,
             progress=None if args.quiet else _progress,
-            extractor_workers=args.extract_workers,
             extract_pause_s=args.extract_pause,
         )
     finally:
