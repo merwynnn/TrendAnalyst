@@ -43,6 +43,7 @@ from trend_analyst.pipeline.layers.l3 import (
 )
 from trend_analyst.pipeline.runs import close_run, open_run
 from trend_analyst.scoring.features import SignalPoint
+from trend_analyst.scoring.interest import phrase_interest
 from trend_analyst.scoring.mgs import WEIGHTS_V1, MgSWeights
 from trend_analyst.store.snapshots import (
     RankedScore,
@@ -129,7 +130,7 @@ def _render_table(candidates: tuple[ScoredCandidate, ...]) -> str:
         return "(no candidates survived extraction)"
 
     header = (
-        f"{'MGS':>5}  {'DV':>4} {'SS':>4} {'SP':>4} {'MP':>4} {'FE':>4}  "
+        f"{'MGS':>5}  {'DV':>4} {'SS':>4} {'SP':>4} {'MP':>4} {'FE':>4} {'CI':>4}  "
         f"{'fad':>9}  {'$/mo (P10-P50-P90)':>26}  phrase"
     )
     rule = "-" * len(header)
@@ -145,7 +146,7 @@ def _render_table(candidates: tuple[ScoredCandidate, ...]) -> str:
         )
         rows.append(
             f"{candidate.mgs:5.1f}  {subs.dv:4.0f} {subs.ss:4.0f} {subs.sp:4.0f} "
-            f"{subs.mp:4.0f} {subs.fe:4.0f}  {flag:>9}  {money:>26}  "
+            f"{subs.mp:4.0f} {subs.fe:4.0f} {subs.ci:4.0f}  {flag:>9}  {money:>26}  "
             f"{candidate.phrase} [{candidate.category_id}]"
         )
     rows.append(rule)
@@ -506,6 +507,11 @@ def _extract_and_rank(
     )
     mining.dropped = tuple(dropped[:_MAX_DROPPED_STORED])
     mining.phrases = ranked.all
+    # Current interest is measured here, not in the scorer: it needs raw lake counts
+    # (the scorer only ever sees normalized points), and one query covers all phrases.
+    interest = phrase_interest(
+        session, [item.phrase for item in ranked.all], as_of=as_of
+    )
     scoring = score_phrases(
         ranked.all,
         points,
@@ -513,6 +519,7 @@ def _extract_and_rank(
         as_of=as_of,
         weights=weights,
         match_points=ranked.match_points,
+        interest=interest,
     )
     pain = _assess_run_pain(
         session,

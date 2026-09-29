@@ -250,7 +250,7 @@ class Candidate(Base):
 class Score(Base):
     """Append-only score snapshot (spec §5.3, §7).
 
-    Every run appends a versioned row (candidate, run, weights version, five sub-scores,
+    Every run appends a versioned row (candidate, run, weights version, sub-scores,
     fad probability, revenue triple). Nothing ever updates it: trends, backtests and
     weight learning read this table's history. A database trigger enforces that.
     """
@@ -273,7 +273,12 @@ class Score(Base):
     buyer_pain: Mapped[float] = mapped_column(Float, nullable=False)  # SP
     money: Mapped[float] = mapped_column(Float, nullable=False)  # MP
     feasibility: Mapped[float] = mapped_column(Float, nullable=False)  # FE
-    #: MGS = 0.30*DV + 0.25*(100-SS) + 0.20*SP + 0.15*MP + 0.10*FE — computed in code.
+    #: Current interest (v2+): raw mention + engagement heat, global percentile. NULL on
+    #: v1 rows, which predate it — readers must treat NULL as "unmeasured", never 0.
+    interest: Mapped[float | None] = mapped_column(Float, nullable=True)
+    #: MGS v1 = 0.30*DV + 0.25*(100-SS) + 0.20*SP + 0.15*MP + 0.10*FE;
+    #: v2 = 0.25*DV + 0.20*(100-SS) + 0.15*SP + 0.10*MP + 0.10*FE + 0.20*CI.
+    #: Computed in code; the weights version says which formula a row used.
     mgs: Mapped[float] = mapped_column(Float, nullable=False)
 
     fad_probability: Mapped[float] = mapped_column(Float, nullable=False)

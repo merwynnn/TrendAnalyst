@@ -24,12 +24,17 @@ __all__ = [
     "Category",
     "Taxonomy",
     "TaxonomyError",
+    "canonical_phrase",
     "load_taxonomy",
     "normalize_phrase",
     "tokens_of",
 ]
 
 _WORD_SPLIT: Final = re.compile(r"[^a-z0-9]+")
+#: Shortest word the singularizer touches ("bus" keeps its s) and the "ies" cutoff
+#: ("pies" is short enough to leave alone, "batteries" is not).
+_MIN_SINGULAR_LEN: Final = 3
+_MIN_IES_LEN: Final = 4
     #: Apostrophes and their typographic cousins: removed rather than turned into spaces, so "don't"
     #: normalizes to "dont" and "I've" to "ive". Turning them into spaces produced junk tokens
     #: ("don", "t", "i", "ve") that leaked into phrases downstream.
@@ -110,6 +115,31 @@ def tokens_of(phrase: str) -> tuple[str, ...]:
     """The words of a phrase, in the same normalized space `match` uses."""
     normalized = normalize_phrase(phrase)
     return tuple(normalized.split()) if normalized else ()
+
+
+def canonical_phrase(phrase: str) -> str:
+    """The dedupe key for a product phrase: normalized, then conservatively singularized.
+
+    One run's "LED Strips" and the next night's "led strip" are the same candidate, and
+    the candidates table must say so — its unique key is the raw (phrase, category)
+    pair. The singular rules stay deliberately timid (batteries -> battery, mats ->
+    mat) and refuse ambiguous endings (glass, news, virus keep their s): a missed
+    merge is a duplicate row, but a wrong merge deletes a real product.
+    """
+    return " ".join(_singular(word) for word in tokens_of(phrase))
+
+
+def _singular(word: str) -> str:
+    """Strip a plural suffix when it is unambiguous, otherwise leave the word alone."""
+    if len(word) <= _MIN_SINGULAR_LEN:
+        return word
+    if word.endswith("ies") and len(word) > _MIN_IES_LEN:
+        return word[:-3] + "y"
+    if word.endswith(("sses", "xes", "zes", "ches", "shes")):
+        return word[:-2]
+    if word.endswith("s") and not word.endswith(("ss", "us", "is", "ws", "as", "es")):
+        return word[:-1]
+    return word
 
 
 def _contains(haystack: str, needle: str) -> bool:

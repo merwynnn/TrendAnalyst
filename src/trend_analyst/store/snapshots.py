@@ -34,6 +34,7 @@ from sqlalchemy import Row, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from config.categories import canonical_phrase
 from trend_analyst.pipeline.layers.l1 import MinedPhrase
 from trend_analyst.scoring.fad import FadAssessment
 from trend_analyst.scoring.mgs import ScoreResult
@@ -63,8 +64,11 @@ def candidate_key(phrase: str, category: str) -> str:
     It exists because the first draft built this key inline in two places with the fields in
     two different orders, and the mismatch failed silently: candidates were written, score
     snapshots were not, and the run reported success. One function, one order.
+
+    Canonicalized: phrases arrive canonical from the Extractor, but tests, replays and
+    older callers may pass raw text — the key forgives them so lookups never miss.
     """
-    return f"{phrase}{_KEY_SEP}{category}"
+    return f"{canonical_phrase(phrase)}{_KEY_SEP}{category}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +103,9 @@ class RankedScore:
     scored_at: datetime
     run_id: uuid.UUID
     mentions: int
+    #: Current interest, None on v1 rows (unmeasured, never zero). Last so older
+    #: constructions without it keep working.
+    interest: float | None = None
 
     @property
     def gap(self) -> float:
@@ -115,6 +122,7 @@ class RankedScore:
             "sp": round(self.buyer_pain, 2),
             "mp": round(self.money, 2),
             "fe": round(self.feasibility, 2),
+            "ci": None if self.interest is None else round(self.interest, 2),
             "fad_label": self.fad_label,
             "fad_probability": round(self.fad_probability, 4),
             "revenue_p10": round(self.revenue_p10, 2),
@@ -138,7 +146,9 @@ def upsert_candidates(session: Session, mined: Sequence[MinedPhrase]) -> dict[st
 
     rows = [
         {
-            "phrase": item.phrase,
+            # Canonical on the way in: the unique key is the raw pair, so only
+            # canonical storage dedupes "LED Strips" against "led strip" across runs.
+            "phrase": canonical_phrase(item.phrase),
             "category": item.category_id,
             "mentions": item.mentions,
             "first_seen_at": item.first_seen,
@@ -182,6 +192,12 @@ def write_snapshot(session: Session, run_id: uuid.UUID, record: ScoreRecord) -> 
             buyer_pain=record.result.sub_scores.sp,
             money=record.result.sub_scores.mp,
             feasibility=record.result.sub_scores.fe,
+            # v1 predates interest: NULL (unmeasured), never a backfilled zero.
+            interest=(
+                None
+                if record.result.weights_version == "v1"
+                else record.result.sub_scores.ci
+            ),
             mgs=record.result.mgs,
             fad_probability=record.fad.probability,
             fad_label=record.fad.label,
@@ -215,6 +231,7 @@ def _ranked_from_row(row: Row[Any]) -> RankedScore:
         buyer_pain=float(score.buyer_pain),
         money=float(score.money),
         feasibility=float(score.feasibility),
+        interest=None if score.interest is None else float(score.interest),
         fad_probability=float(score.fad_probability),
         fad_label=str(score.fad_label),
         revenue_p10=float(score.revenue_p10),
@@ -285,9 +302,10 @@ def history_for(session: Session, phrase: str, category: str | None = None) -> l
 def snapshot_hash(session: Session, run_id: uuid.UUID) -> str:
     """A SHA-256 over a run's scores — the determinism check of spec §5.4.
 
-    Covers the numbers that a replay must reproduce exactly (the five sub-scores, MGS, the
+    Covers the numbers that a replay must reproduce exactly (the sub-scores, MGS, the
     fad flag and the revenue triple) and deliberately not ``scored_at`` or the row id, which
-    are allowed to differ between two runs of the same inputs.
+    are allowed to differ between two runs of the same inputs. Interest rides along
+    (None on v1 rows hashes as null — a replayed v1 row reproduces its own null).
     """
     rows = session.execute(
         select(
@@ -299,6 +317,7 @@ def snapshot_hash(session: Session, run_id: uuid.UUID) -> str:
             Score.buyer_pain,
             Score.money,
             Score.feasibility,
+            Score.interest,
             Score.mgs,
             Score.fad_probability,
             Score.fad_label,
@@ -316,7 +335,8 @@ def snapshot_hash(session: Session, run_id: uuid.UUID) -> str:
             "phrase": str(row.phrase),
             "category": str(row.category),
             "weights_version": str(row.weights_version),
-            "sub_scores": [round(float(value), 6) for value in row[3:8]],
+            "sub_scores": [round(float(value), 6) for value in row[3:8]]
+            + [None if row[8] is None else round(float(row[8]), 6)],
             "mgs": round(float(row.mgs), 6),
             "fad_probability": round(float(row.fad_probability), 6),
             "fad_label": str(row.fad_label),

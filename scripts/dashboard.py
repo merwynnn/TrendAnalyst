@@ -483,6 +483,7 @@ def _winner_card(
             f"{html.escape(str(niche.get('problem') or ''))} — "
             f"{html.escape(str(niche.get('rationale') or ''))}</p>"
         )
+    interest = "—" if idea.interest is None else f"{idea.interest:.0f}"
     return f"""<section class="niche">
 <h2>#{rank} {html.escape(idea.phrase)}</h2>
 <div class="scores"><span class="badge keep">judge: keep</span>
@@ -492,7 +493,8 @@ def _winner_card(
 <span>$/mo P50 {idea.revenue_p50:,.0f}</span></div>
 <div class="bar"><i style="width: {idea.mgs:.0f}%"></i></div>
 <p>MGS {idea.mgs:.1f} — DV {idea.demand_velocity:.0f} · SS {idea.saturation:.0f} ·
-SP {idea.buyer_pain:.0f} · MP {idea.money:.0f} · FE {idea.feasibility:.0f};
+SP {idea.buyer_pain:.0f} · MP {idea.money:.0f} · FE {idea.feasibility:.0f} ·
+CI {interest} [weights {html.escape(idea.weights_version)}];
 mentions {idea.mentions}</p>
 {pain_line}
 <p><b>Judge</b> (conf {float(getattr(judgement, "confidence", 0) or 0):.2f}):
@@ -515,13 +517,21 @@ def _render_movers(bundle: dict[str, Any]) -> str:
     current = list(previous.get("current", ()))
     baseline = dict(previous.get("previous", {}))
     fresh = [idea for idea in current if idea.candidate_id not in baseline]
+    # Deltas only within one weights version: v1 and v2 MGS are different formulas,
+    # and diffing them would read as momentum. Cross-version ideas list without a badge.
     moved = [
-        (idea.mgs - baseline[idea.candidate_id].mgs, idea)
+        (
+            None
+            if idea.weights_version != baseline[idea.candidate_id].weights_version
+            else idea.mgs - baseline[idea.candidate_id].mgs,
+            idea,
+        )
         for idea in current
         if idea.candidate_id in baseline
     ]
-    risers = sorted(((delta, idea) for delta, idea in moved if delta > 0), reverse=True)[:10]
-    fallers = sorted(((delta, idea) for delta, idea in moved if delta < 0))[:10]
+    scored_moves = [(delta, idea) for delta, idea in moved if delta is not None]
+    risers = sorted(((d, i) for d, i in scored_moves if d > 0), reverse=True)[:10]
+    fallers = sorted(((d, i) for d, i in scored_moves if d < 0))[:10]
 
     def _row(delta: float | None, idea: RankedScore) -> str:
         cls = "" if delta is None else ("up" if delta > 0 else "down")
@@ -614,7 +624,7 @@ def _niche_card(
             )
         )
     table = (
-        "<table><tr><th>#</th><th>idea</th><th>MGS</th><th>pain&nbsp;lens</th>"
+        "<table><tr><th>#</th><th>idea</th><th>MGS</th><th>CI</th><th>pain&nbsp;lens</th>"
         "<th>fad</th><th>$/mo P50</th><th>seen</th><th>status</th></tr>"
         + "".join(rows)
         + "</table>"
@@ -662,10 +672,12 @@ def _idea_row(
         status = "below shortlist"
     else:
         status = "unjudged"
+    interest = "—" if item.interest is None else f"{item.interest:.0f}"
     detail = [
         f"<div>MGS {item.mgs:.1f} (DV {item.demand_velocity:.0f} · "
         f"SS {item.saturation:.0f} · SP {item.buyer_pain:.0f} · "
-        f"MP {item.money:.0f} · FE {item.feasibility:.0f})</div>"
+        f"MP {item.money:.0f} · FE {item.feasibility:.0f} · CI {interest}) "
+        f"[weights {html.escape(item.weights_version)}]</div>"
     ]
     if judgement is not None and getattr(judgement, "reason", ""):
         decision = html.escape(str(getattr(judgement, "decision", "")))
@@ -699,6 +711,7 @@ def _idea_row(
         f"<tr><td>{position}</td><td><b>{html.escape(item.phrase)}</b>"
         f"<details><summary>evidence &amp; why</summary>{''.join(detail)}</details></td>"
         f"<td>{item.mgs:.1f}</td>"
+        f"<td>{interest}</td>"
         f"<td>SP {item.buyer_pain:.0f}</td>"
         f"<td>{html.escape(item.fad_label)} ({item.fad_probability:.2f})</td>"
         f"<td>{item.revenue_p50:,.0f}</td>"

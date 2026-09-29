@@ -49,12 +49,15 @@ FadLabel = Literal["fad", "trend", "evergreen"]
 
 #: The scoring buckets the Extractor may file a product under. A closed list on purpose:
 #: an unknown category is a schema violation (retry once, then drop), not a guess the
-#: scorer cannot percentile. Adding an eleventh category means changing this list and
+#: scorer cannot percentile. Adding a fifteenth category means changing this list and
 #: the taxonomy together — visible and intentional, never silent.
 ExtractorCategory = Literal[
     "baby_kids",
+    "beauty_personal_care",
     "electronics_accessories",
+    "fashion_apparel",
     "fitness_recovery",
+    "health_wellness",
     "home_improvement",
     "home_office",
     "kitchen_dining",
@@ -62,6 +65,7 @@ ExtractorCategory = Literal[
     "outdoor_garden",
     "pets",
     "tools_diy",
+    "toys_games",
 ]
 
 

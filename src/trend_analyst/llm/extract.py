@@ -32,7 +32,7 @@ from typing import Any, Final
 
 from sqlalchemy.orm import Session
 
-from config.categories import normalize_phrase
+from config.categories import canonical_phrase, normalize_phrase
 from trend_analyst.llm.gateway import (
     DEFAULT_BUDGETS,
     GateBudget,
@@ -76,6 +76,10 @@ EXTRACTOR_CATEGORIES: Final[tuple[str, ...]] = (
     "electronics_accessories",
     "baby_kids",
     "music_audio",
+    "beauty_personal_care",
+    "fashion_apparel",
+    "toys_games",
+    "health_wellness",
 )
 
 #: Texts per provider call. A hundred texts at ~150 tokens each is ~15k tokens in —
@@ -107,11 +111,16 @@ Below are numbered texts people wrote (post titles and quotes, with their source
 Return the distinct physical products, digital goods or micro-SaaS ideas they talk about wanting,
 complaining about, comparing or asking for.
 
-For EACH product: phrase it as a searchable product noun in 2-5 words USING WORDS FROM THE
-TEXTS (e.g. "circ saw blade guard", not "cutting tool accessory"); file it under exactly one
-of these categories: baby_kids, electronics_accessories, fitness_recovery, home_improvement,
-home_office, kitchen_dining, music_audio, outdoor_garden, pets, tools_diy; and list in doc_ids
-EVERY numbered text that mentions it (all of them, not just the first).
+For EACH product: name it as a clear generic product idea a shopper would search for, in
+2-6 plain words USING WORDS FROM THE TEXTS (e.g. "no-drill removable shelf", not "shelf
+thing"; "circ saw blade guard", not "cutting tool accessory"). The name must say what the
+product IS, never whose it is: no brand names, no model names, no proper nouns ("dyson
+vacuum", "V15", "Cat Jarman" are all wrong — "cordless stick vacuum" is right). File it
+under exactly one of these categories: baby_kids, beauty_personal_care,
+electronics_accessories, fashion_apparel, fitness_recovery, health_wellness,
+home_improvement, home_office, kitchen_dining, music_audio, outdoor_garden, pets,
+tools_diy, toys_games; and list in doc_ids EVERY numbered text that mentions it (all of
+them, not just the first).
 
 Skip, without mentioning: sentence fragments ("filament thanks", "anybody saw"); bare opinions
 with no problem, wish or comparison ("excellent filament"); thread furniture ("weekly thread",
@@ -314,7 +323,10 @@ def resolve_output(
     merged: dict[tuple[str, str], dict[str, Any]] = {}
     invented = 0
     for product in output.products:
-        phrase = " ".join(product.phrase.split())
+        # Canonical at birth: one run's "LED Strips" and the next night's "led strip"
+        # become the same stored phrase, so the candidates table dedupes across runs
+        # instead of accumulating spelling variants.
+        phrase = canonical_phrase(product.phrase)
         if not phrase:
             continue
         kept = {ref for ref in product.doc_ids if ref in valid_ids}

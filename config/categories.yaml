@@ -21,7 +21,7 @@
 # scoring code says so in its docstrings instead of pretending the numbers are measured.
 # ---------------------------------------------------------------------------
 
-version: 1
+version: 2
 
 #: Words that make a product hard to ship alone, whatever the category.
 feasibility_penalties:
@@ -87,3 +87,23 @@ categories:
     label: Music and audio
     price_band: [25, 300]
     feasibility_prior: 71
+
+  beauty_personal_care:
+    label: Beauty and personal care
+    price_band: [8, 80]
+    feasibility_prior: 76
+
+  fashion_apparel:
+    label: Fashion and apparel
+    price_band: [15, 120]
+    feasibility_prior: 78
+
+  toys_games:
+    label: Toys and games
+    price_band: [10, 100]
+    feasibility_prior: 72
+
+  health_wellness:
+    label: Health and wellness
+    price_band: [15, 150]
+    feasibility_prior: 66

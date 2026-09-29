@@ -184,6 +184,7 @@ def score_phrases(
     fad_weights: FadWeights = FAD_WEIGHTS_V1,
     revenue_model: RevenueModel = MODEL_V1,
     match_points: Mapping[str, Sequence[SignalPoint]] | None = None,
+    interest: Mapping[str, float] | None = None,
 ) -> L3Report:
     """Score every mined phrase: features, per-category percentiles, fad flag, revenue.
 
@@ -193,6 +194,9 @@ def score_phrases(
         match_points: optional pre-computed phrase -> points mapping. `mine()` already knows
             which signals produced each phrase, and passing that in avoids a second match
             that could disagree with the first.
+        interest: optional phrase -> current-interest percentile (0-100, global across
+            the night's candidates). Scored without it, a phrase's heat is invisible —
+            pass the whole lake's voice, not a guess.
     """
     report = L3Report()
     features_by_category: dict[str, list[EntityFeatures]] = defaultdict(list)
@@ -214,7 +218,10 @@ def score_phrases(
         features_by_category[item.category_id].append(features)
         feature_index[(item.category_id, item.phrase)] = features
 
-    scored = score_all(features_by_category, taxonomy=taxonomy, as_of=as_of, weights=weights)
+    scored = score_all(
+        features_by_category, taxonomy=taxonomy, as_of=as_of,
+        weights=weights, interest=interest,
+    )
     mentions = {item.phrase: item.mentions for item in mined}
     candidates: list[ScoredCandidate] = []
 

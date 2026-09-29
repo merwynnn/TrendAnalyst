@@ -61,6 +61,7 @@ from trend_analyst.pipeline.briefs import render_briefs_table
 from trend_analyst.pipeline.decide import read_ranked, run_decide
 from trend_analyst.pipeline.layers.l1 import DEFAULT_MIN_KEEP, DEFAULT_PRUNE_FRACTION
 from trend_analyst.pipeline.runs import close_run, open_run, read_cursor, write_cursor
+from trend_analyst.scoring.mgs import WEIGHTS_V2
 from trend_analyst.sources.base import (
     HTTP_CLIENT_ERROR,
     FetchContext,
@@ -866,6 +867,7 @@ def _dispatch(
             sessions=sessions,
             taxonomy=taxonomy,
             as_of=_resolve_as_of(args, sessions),
+            weights=WEIGHTS_V2,
             trigger="manual",
             min_keep=args.min_keep,
             prune_fraction=args.prune_fraction,
@@ -1160,15 +1162,17 @@ def _render_ranked(ranked: Sequence[Any]) -> str:
     if not ranked:
         return "no score snapshots yet - run --layers L0,L1,L3 first"
     header = (
-        f"{'MGS':>5}  {'DV':>4} {'SS':>4} {'SP':>4} {'MP':>4} {'FE':>4}  "
+        f"{'MGS':>5}  {'DV':>4} {'SS':>4} {'SP':>4} {'MP':>4} {'FE':>4} {'CI':>4}  "
         f"{'fad':>9}  {'prob':>5}  {'$/mo P10-P50-P90':>24}  phrase"
     )
     rows = [header, "-" * len(header)]
     for score in ranked:
         money = f"{score.revenue_p10:,.0f}-{score.revenue_p50:,.0f}-{score.revenue_p90:,.0f}"
+        interest = score.interest
         rows.append(
             f"{score.mgs:5.1f}  {score.demand_velocity:4.0f} {score.saturation:4.0f} "
-            f"{score.buyer_pain:4.0f} {score.money:4.0f} {score.feasibility:4.0f}  "
+            f"{score.buyer_pain:4.0f} {score.money:4.0f} {score.feasibility:4.0f} "
+            f"{'—' if interest is None else f'{interest:4.0f}'}  "
             f"{score.fad_label:>9}  {score.fad_probability:5.2f}  {money:>24}  "
             f"{score.phrase} [{score.category}] w={score.weights_version}"
         )

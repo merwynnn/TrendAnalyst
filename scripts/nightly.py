@@ -46,6 +46,7 @@ from trend_analyst.pipeline.orchestrator import (
     run_l0,
 )
 from trend_analyst.pipeline.runs import close_run, open_run
+from trend_analyst.scoring.mgs import WEIGHTS_V2
 from trend_analyst.sources.base import (
     FetchContext,
     PluginContractError,
@@ -206,6 +207,7 @@ def run_nightly(
         sessions=sessions,
         taxonomy=taxonomy,
         as_of=as_of,
+        weights=WEIGHTS_V2,
         trigger="nightly",
         source_ids=list(source_ids) if source_ids else None,
         sender=extractor_sender,

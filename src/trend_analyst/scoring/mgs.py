@@ -94,7 +94,7 @@ _FEASIBILITY_FLOOR: Final = 5.0
 
 @dataclass(frozen=True, slots=True)
 class MgSWeights:
-    """The five weights and their version — the identity of a scoring model."""
+    """The weights and their version — the identity of a scoring model."""
 
     version: str
     dv: float
@@ -102,29 +102,49 @@ class MgSWeights:
     sp: float
     mp: float
     fe: float
+    #: Current interest, 0 in v1 (which predates it). Defaults to 0 so every weights
+    #: literal written before interest existed still validates and still sums to 1.
+    ci: float = 0.0
 
     def __post_init__(self) -> None:
-        total = self.dv + self.ss + self.sp + self.mp + self.fe
+        total = self.dv + self.ss + self.sp + self.mp + self.fe + self.ci
         if not math.isclose(total, 1.0, abs_tol=1e-9):
             raise ValueError(f"weights must sum to 1.0, got {total!r}")
 
     def as_dict(self) -> dict[str, float]:
-        return {"dv": self.dv, "ss": self.ss, "sp": self.sp, "mp": self.mp, "fe": self.fe}
+        return {
+            "dv": self.dv,
+            "ss": self.ss,
+            "sp": self.sp,
+            "mp": self.mp,
+            "fe": self.fe,
+            "ci": self.ci,
+        }
 
 
 #: Spec §6.1, verbatim: MGS = 0.30DV + 0.25(100-SS) + 0.20SP + 0.15MP + 0.10FE
 WEIGHTS_V1: Final = MgSWeights(version="v1", dv=0.30, ss=0.25, sp=0.20, mp=0.15, fe=0.10)
 
+#: v2 adds current interest (raw mention + engagement heat, global percentile): DV .25,
+#: gap .20, SP .15, MP .10, FE .10, CI .20. Old rows keep v1 and stay comparable —
+#: the weights version is on every snapshot, and the inputs dict carries the raw
+#: interest so v2 can be recomputed, not just reread.
+WEIGHTS_V2: Final = MgSWeights(
+    version="v2", dv=0.25, ss=0.20, sp=0.15, mp=0.10, fe=0.10, ci=0.20
+)
+
 
 @dataclass(frozen=True, slots=True)
 class SubScores:
-    """The five 0-100 inputs to the gap score, plus why each one looks the way it does."""
+    """The 0-100 inputs to the gap score, plus why each one looks the way it does."""
 
     dv: float
     ss: float
     sp: float
     mp: float
     fe: float
+    #: Current interest (raw heat, global percentile). 0 in v1, which predates it.
+    ci: float = 0.0
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -133,6 +153,7 @@ class SubScores:
             "sp": round(self.sp, 2),
             "mp": round(self.mp, 2),
             "fe": round(self.fe, 2),
+            "ci": round(self.ci, 2),
         }
 
     @property
@@ -217,12 +238,15 @@ def score_category(
     taxonomy: Taxonomy,
     as_of: datetime,
     weights: MgSWeights = WEIGHTS_V1,
+    interest: Mapping[str, float] | None = None,
 ) -> list[ScoreResult]:
     """Score every candidate in one category against that category's own population.
 
     The population is the category, never the whole lake: that is what makes a sub-score a
     *per-category* percentile (spec §6.1), and what stops a niche idea from being punished
-    for not being a celebrity.
+    for not being a celebrity. Interest is the exception, deliberately: heat is absolute,
+    and normalizing it away per niche would hide the giant everyone is talking about —
+    so it arrives pre-normalized (global percentile across the night's candidates).
     """
     if not features:
         return []
@@ -241,6 +265,7 @@ def score_category(
     results: list[ScoreResult] = []
     for index, item in enumerate(features):
         feasibility, penalties, complexity = _feasibility(item, category, taxonomy)
+        ci_value = clamp(float((interest or {}).get(item.entity, 0.0)))
         sub_scores = SubScores(
             dv=clamp(_BLEND["dv_ewma"] * dv_ewma[index] + _BLEND["dv_growth"] * dv_growth[index]),
             ss=clamp(
@@ -250,6 +275,7 @@ def score_category(
             sp=clamp(_BLEND["sp_ratio"] * sp_ratio[index] + _BLEND["sp_count"] * sp_count[index]),
             mp=clamp(_BLEND["mp_price"] * price + _BLEND["mp_intent"] * mp_intent[index]),
             fe=feasibility,
+            ci=ci_value,
         )
         mgs = (
             weights.dv * sub_scores.dv
@@ -257,6 +283,7 @@ def score_category(
             + weights.sp * sub_scores.sp
             + weights.mp * sub_scores.mp
             + weights.fe * sub_scores.fe
+            + weights.ci * sub_scores.ci
         )
         results.append(
             ScoreResult(
@@ -280,6 +307,7 @@ def score_category(
                     "feasibility_prior": category.feasibility_prior,
                     "feasibility_penalties": penalties,
                     "complexity_markers": complexity,
+                    "interest": ci_value,
                 },
             )
         )
@@ -292,13 +320,17 @@ def score_all(
     taxonomy: Taxonomy,
     as_of: datetime,
     weights: MgSWeights = WEIGHTS_V1,
+    interest: Mapping[str, float] | None = None,
 ) -> list[ScoreResult]:
     """Score every category, returning one flat list ordered by MGS (highest first)."""
     scored: list[ScoreResult] = []
     for category_id, features in features_by_category.items():
         category = taxonomy.by_id(category_id)
         scored.extend(
-            score_category(features, category, taxonomy=taxonomy, as_of=as_of, weights=weights)
+            score_category(
+                features, category, taxonomy=taxonomy, as_of=as_of,
+                weights=weights, interest=interest,
+            )
         )
     # Ties break on the entity name so the order is deterministic across runs — a ranked
     # table that shuffles equal scores cannot be diffed between nights.
