@@ -277,7 +277,7 @@ class Score(Base):
     #: v1 rows, which predate it — readers must treat NULL as "unmeasured", never 0.
     interest: Mapped[float | None] = mapped_column(Float, nullable=True)
     #: MGS v1 = 0.30*DV + 0.25*(100-SS) + 0.20*SP + 0.15*MP + 0.10*FE;
-    #: v2 = 0.25*DV + 0.20*(100-SS) + 0.15*SP + 0.10*MP + 0.10*FE + 0.20*CI.
+    #: v2 = 0.20*DV + 0.20*(100-SS) + 0.15*SP + 0.10*MP + 0.10*FE + 0.25*CI.
     #: Computed in code; the weights version says which formula a row used.
     mgs: Mapped[float] = mapped_column(Float, nullable=False)
 

@@ -62,8 +62,9 @@ def test_weights_v2_adds_interest_and_v1_is_untouched() -> None:
     assert WEIGHTS_V1.ci == 0.0
     assert WEIGHTS_V1.as_dict()["ci"] == 0.0
     assert WEIGHTS_V2.version == "v2"
-    assert WEIGHTS_V2.ci == 0.20
-    assert WEIGHTS_V2.as_dict()["ci"] == 0.20
+    assert WEIGHTS_V2.ci == 0.25
+    assert WEIGHTS_V2.dv == 0.20
+    assert WEIGHTS_V2.as_dict()["ci"] == 0.25
 
 
 def test_interest_flows_into_subscores_and_mgs() -> None:

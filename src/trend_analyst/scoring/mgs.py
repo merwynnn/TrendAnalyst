@@ -125,12 +125,13 @@ class MgSWeights:
 #: Spec §6.1, verbatim: MGS = 0.30DV + 0.25(100-SS) + 0.20SP + 0.15MP + 0.10FE
 WEIGHTS_V1: Final = MgSWeights(version="v1", dv=0.30, ss=0.25, sp=0.20, mp=0.15, fe=0.10)
 
-#: v2 adds current interest (raw mention + engagement heat, global percentile): DV .25,
-#: gap .20, SP .15, MP .10, FE .10, CI .20. Old rows keep v1 and stay comparable —
-#: the weights version is on every snapshot, and the inputs dict carries the raw
-#: interest so v2 can be recomputed, not just reread.
+#: v2 adds current interest (raw mention + engagement heat, global percentile): DV .20,
+#: gap .20, SP .15, MP .10, FE .10, CI .25. Interest is the single biggest voice —
+#: a giant everyone already argues about outranks a fast riser from zero. Old rows
+#: keep v1 and stay comparable — the weights version is on every snapshot, and the
+#: inputs dict carries the raw interest so v2 can be recomputed, not just reread.
 WEIGHTS_V2: Final = MgSWeights(
-    version="v2", dv=0.25, ss=0.20, sp=0.15, mp=0.10, fe=0.10, ci=0.20
+    version="v2", dv=0.20, ss=0.20, sp=0.15, mp=0.10, fe=0.10, ci=0.25
 )
 
 
